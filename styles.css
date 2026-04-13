@@ -28,7 +28,7 @@ body {
 }
 
 body {
-  font-family: "Manrope", "Segoe UI", sans-serif;
+  font-family: Arial, sans-serif;
   color: var(--text);
   background:
     radial-gradient(circle at 88% 9%, rgba(14, 124, 134, 0.14), transparent 40%),
@@ -77,7 +77,7 @@ a {
   align-items: center;
   gap: 10px;
   text-decoration: none;
-  font-family: "Space Grotesk", "Manrope", sans-serif;
+  font-family: Arial, sans-serif;
   font-weight: 700;
   font-size: 1.05rem;
   letter-spacing: 0.01em;
@@ -178,7 +178,7 @@ a {
 
 .hero h1 {
   margin: 0;
-  font-family: "Space Grotesk", "Manrope", sans-serif;
+  font-family: Arial, sans-serif;
   line-height: 1.05;
   font-size: clamp(2rem, 4vw, 3.45rem);
   max-width: 17ch;
@@ -266,7 +266,7 @@ a {
 .section h2 {
   margin: 0;
   font-size: clamp(1.3rem, 2.2vw, 1.8rem);
-  font-family: "Space Grotesk", "Manrope", sans-serif;
+  font-family: Arial, sans-serif;
 }
 
 .section-intro {
@@ -345,7 +345,7 @@ a {
 .legal-card h1 {
   margin: 0;
   font-size: clamp(1.85rem, 3.5vw, 2.4rem);
-  font-family: "Space Grotesk", "Manrope", sans-serif;
+  font-family: Arial, sans-serif;
 }
 
 .last-updated {
