@@ -406,6 +406,7 @@ a {
   align-items: center;
   color: var(--text-muted);
   font-size: 0.86rem;
+  flex-wrap: wrap;
 }
 
 .footer-links {
@@ -420,6 +421,13 @@ a {
 
 .footer-links a:hover {
   color: var(--brand-strong);
+}
+
+.footer-llc {
+  width: 100%;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 @media (max-width: 960px) {
