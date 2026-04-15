@@ -1,0 +1,17 @@
+{
+  "name": "snaptip-landing-page",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SnapTip landing + minimal webhook backend for Vercel",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js",
+    "dev": "node api/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

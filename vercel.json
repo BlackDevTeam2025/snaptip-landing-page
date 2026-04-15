@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/webhooks/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/auth/callback",
+      "destination": "/api/index"
+    }
+  ]
+}
