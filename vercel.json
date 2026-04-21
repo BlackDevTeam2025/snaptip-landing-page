@@ -5,7 +5,7 @@
       "destination": "/api/index"
     },
     {
-      "source": "/auth/callback",
+      "source": "/auth/:path*",
       "destination": "/api/index"
     }
   ]
