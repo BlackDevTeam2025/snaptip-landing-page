@@ -1,5 +1,12 @@
 {
+  "framework": null,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
+    {
+      "source": "/admin-api/:path*",
+      "destination": "/api/index"
+    },
     {
       "source": "/webhooks/:path*",
       "destination": "/api/index"
@@ -7,6 +14,14 @@
     {
       "source": "/auth/:path*",
       "destination": "/api/index"
+    },
+    {
+      "source": "/admin",
+      "destination": "/admin/index.html"
+    },
+    {
+      "source": "/admin/:path((?!.*\\..*).*)",
+      "destination": "/admin/index.html"
     }
   ]
 }
