@@ -13,6 +13,9 @@ let dbService = db;
 const LOG_DIR = "/tmp/webhooks";
 const MAX_BODY_SIZE = "2mb";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
+const SHOPIFY_SCOPES =
+  process.env.SHOPIFY_SCOPES ||
+  "read_orders,read_publications,write_cart_transforms,write_products,write_publications";
 const ADMIN_COOKIE_NAME = "snaptip_admin_session";
 const ADMIN_SESSION_TTL_SECONDS = Number(
   process.env.ADMIN_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7
@@ -33,6 +36,54 @@ const SUPPORTED_INSTALLATION_STATUSES = new Set([
 let adminSeedPromise = null;
 
 app.disable("x-powered-by");
+
+app.get(["/auth/start", "/app", "/app/*"], (req, res) => {
+  try {
+    const shop = String(req.query.shop || "").trim().toLowerCase();
+    if (!shop) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required query param: shop",
+      });
+    }
+
+    const secret = process.env.SHOPIFY_API_SECRET;
+    if (!secret) {
+      return res.status(500).json({
+        ok: false,
+        error: "Server is missing SHOPIFY_API_SECRET",
+      });
+    }
+
+    if (!isValidShopifyDomain(shop)) {
+      return res.status(400).json({ ok: false, error: "Invalid shop domain" });
+    }
+
+    if (req.query.hmac && !isValidShopifyOAuthHmac(secret, req.query)) {
+      return res.status(401).json({ ok: false, error: "Invalid OAuth HMAC" });
+    }
+
+    const clientId = getShopifyClientId();
+    if (!clientId) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing Shopify client id env var",
+      });
+    }
+
+    const baseUrl = getAppBaseUrl(req);
+    const authorizeUrl = new URL(`https://${shop}/admin/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("scope", SHOPIFY_SCOPES);
+    authorizeUrl.searchParams.set("redirect_uri", `${baseUrl}/auth/callback`);
+    authorizeUrl.searchParams.set("state", crypto.randomBytes(16).toString("hex"));
+
+    return res.redirect(302, authorizeUrl.toString());
+  } catch (error) {
+    console.error("OAuth start error:", error);
+    return res.status(500).json({ ok: false, error: "OAuth start failed" });
+  }
+});
 
 app.get("/auth/callback", async (req, res) => {
   try {
@@ -816,6 +867,17 @@ function getShopifyClientId() {
     process.env.CLIENT_ID ||
     ""
   );
+}
+
+function getAppBaseUrl(req) {
+  const configuredUrl = String(process.env.APP_BASE_URL || "").replace(/\/$/, "");
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  const forwardedProto = req.get("x-forwarded-proto") || req.protocol || "https";
+  const host = req.get("x-forwarded-host") || req.get("host");
+  return `${forwardedProto}://${host}`;
 }
 
 function isValidShopifyOAuthHmac(secret, query) {

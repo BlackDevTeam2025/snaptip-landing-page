@@ -4,6 +4,9 @@ import request from "supertest";
 
 process.env.ADMIN_EMAIL = "admin@snaptip.tech";
 process.env.ADMIN_PASSWORD = "AdminPassword123!";
+process.env.SHOPIFY_API_SECRET = "test-secret";
+process.env.SHOPIFY_API_KEY = "test-client-id";
+process.env.APP_BASE_URL = "https://snaptip.tech";
 
 const { default: adminAuth } = await import("../../api/admin-auth");
 const { default: app } = await import("../../api/index");
@@ -140,5 +143,20 @@ describe("admin-api integration", () => {
     expect(response.body.ok).toBe(true);
     expect(response.body.data).toHaveLength(1);
     expect(response.body.data[0].payload_preview).toContain("{\"test\":true}");
+  });
+
+  it("starts Shopify OAuth from /auth/start", async () => {
+    const response = await request(app).get(
+      "/auth/start?shop=demo.myshopify.com"
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toContain(
+      "https://demo.myshopify.com/admin/oauth/authorize"
+    );
+    expect(response.headers.location).toContain("client_id=test-client-id");
+    expect(response.headers.location).toContain(
+      "redirect_uri=https%3A%2F%2Fsnaptip.tech%2Fauth%2Fcallback"
+    );
   });
 });
