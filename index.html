@@ -5,6 +5,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
   <title>SnapTip — Tipping for E-commerce Teams</title>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var shop = (params.get("shop") || "").toLowerCase();
+      if (/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop)) {
+        window.location.replace("/auth/start" + window.location.search);
+      }
+    })();
+  </script>
   <style>
     *,
     *::before,
