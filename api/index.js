@@ -13,9 +13,10 @@ let dbService = db;
 const LOG_DIR = "/tmp/webhooks";
 const MAX_BODY_SIZE = "2mb";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
-const SHOPIFY_SCOPES =
+const SHOPIFY_SCOPES = String(
   process.env.SHOPIFY_SCOPES ||
-  "read_orders,read_publications,write_cart_transforms,write_products,write_publications";
+    "read_orders,read_publications,write_cart_transforms,write_products,write_publications"
+).trim();
 const ADMIN_COOKIE_NAME = "snaptip_admin_session";
 const ADMIN_SESSION_TTL_SECONDS = Number(
   process.env.ADMIN_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7
@@ -860,17 +861,19 @@ function isValidShopifyDomain(shop) {
 }
 
 function getShopifyClientId() {
-  return (
+  return String(
     process.env.SHOPIFY_API_KEY ||
     process.env.SHOPIFY_CLIENT_ID ||
     process.env.SHOPIFY_APP_CLIENT_ID ||
     process.env.CLIENT_ID ||
     ""
-  );
+  ).trim();
 }
 
 function getAppBaseUrl(req) {
-  const configuredUrl = String(process.env.APP_BASE_URL || "").replace(/\/$/, "");
+  const configuredUrl = String(process.env.APP_BASE_URL || "")
+    .trim()
+    .replace(/\/$/, "");
   if (configuredUrl) {
     return configuredUrl;
   }
