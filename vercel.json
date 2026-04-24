@@ -8,6 +8,10 @@
       "destination": "/api/index"
     },
     {
+      "source": "/internal/:path*",
+      "destination": "/api/index"
+    },
+    {
       "source": "/webhooks/:path*",
       "destination": "/api/index"
     },

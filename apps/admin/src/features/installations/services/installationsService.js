@@ -26,3 +26,13 @@ export function getInstallations(params) {
 export function getInstallationById(id) {
   return apiRequest(`/admin-api/installations/${id}`);
 }
+
+/**
+ * @param {Array<string|number>} installationIds
+ */
+export function sendBulkInstallationEmail(installationIds) {
+  return apiRequest("/admin-api/installations/bulk-email", {
+    method: "POST",
+    body: { installationIds },
+  });
+}

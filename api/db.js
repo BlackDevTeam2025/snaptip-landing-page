@@ -81,9 +81,14 @@ async function upsertInstallation({
   status,
   installedAt,
   uninstalledAt,
+  activeAt,
+  deactivatedAt,
   metadata,
 }) {
   await ensureSchema();
+
+  const normalizedActiveAt = activeAt || installedAt || null;
+  const normalizedDeactivatedAt = deactivatedAt || uninstalledAt || null;
 
   await sql.query(
     `
@@ -96,10 +101,12 @@ async function upsertInstallation({
         status,
         installed_at,
         uninstalled_at,
+        active_at,
+        deactivated_at,
         last_seen_at,
         metadata
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9::jsonb
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11::jsonb
       )
       ON CONFLICT (platform, shop_identifier)
       DO UPDATE SET
@@ -109,6 +116,8 @@ async function upsertInstallation({
         status = EXCLUDED.status,
         installed_at = COALESCE(EXCLUDED.installed_at, app_installations.installed_at),
         uninstalled_at = EXCLUDED.uninstalled_at,
+        active_at = COALESCE(EXCLUDED.active_at, app_installations.active_at),
+        deactivated_at = EXCLUDED.deactivated_at,
         last_seen_at = NOW(),
         metadata = app_installations.metadata || EXCLUDED.metadata,
         updated_at = NOW()
@@ -122,6 +131,8 @@ async function upsertInstallation({
       status || "installed",
       installedAt || null,
       uninstalledAt || null,
+      normalizedActiveAt,
+      normalizedDeactivatedAt,
       JSON.stringify(metadata || {}),
     ]
   );
@@ -136,6 +147,7 @@ async function markShopUninstalled({ platform, shopIdentifier }) {
       SET
         status = 'uninstalled',
         uninstalled_at = NOW(),
+        deactivated_at = NOW(),
         updated_at = NOW(),
         last_seen_at = NOW()
       WHERE platform = $1 AND shop_identifier = $2
@@ -324,6 +336,7 @@ async function listInstallations({
   platform,
   status,
   queryText,
+  monthStart,
   page = 1,
   pageSize = 20,
 }) {
@@ -372,6 +385,8 @@ async function listInstallations({
         status,
         installed_at,
         uninstalled_at,
+        COALESCE(active_at, installed_at) AS active_at,
+        COALESCE(deactivated_at, uninstalled_at) AS deactivated_at,
         last_seen_at,
         metadata,
         created_at,
@@ -385,7 +400,12 @@ async function listInstallations({
     listValues
   );
 
-  return { rows: rowsResult.rows, total };
+  const rows = await attachCurrentMonthTipTotals(
+    rowsResult.rows,
+    monthStart || getCurrentMonthStart()
+  );
+
+  return { rows, total };
 }
 
 async function getInstallationById(installationId) {
@@ -402,6 +422,8 @@ async function getInstallationById(installationId) {
         status,
         installed_at,
         uninstalled_at,
+        COALESCE(active_at, installed_at) AS active_at,
+        COALESCE(deactivated_at, uninstalled_at) AS deactivated_at,
         last_seen_at,
         metadata,
         created_at,
@@ -411,6 +433,166 @@ async function getInstallationById(installationId) {
       LIMIT 1
     `,
     [installationId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function upsertInstallationMonthlyTipTotal({
+  platform,
+  shopIdentifier,
+  monthStart,
+  currency,
+  tipAmount,
+}) {
+  await ensureSchema();
+
+  const result = await sql.query(
+    `
+      INSERT INTO installation_monthly_tip_totals (
+        platform,
+        shop_identifier,
+        month_start,
+        currency,
+        tip_amount
+      ) VALUES ($1, $2, $3::date, $4, $5)
+      ON CONFLICT (platform, shop_identifier, month_start, currency)
+      DO UPDATE SET
+        tip_amount = EXCLUDED.tip_amount,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [platform, shopIdentifier, monthStart, currency, tipAmount]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getBulkEmailInstallations({ installationIds, monthStart }) {
+  await ensureSchema();
+
+  const uniqueIds = [...new Set(installationIds.map((id) => Number(id)))].filter(
+    (id) => Number.isFinite(id) && id > 0
+  );
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  const result = await sql.query(
+    `
+      SELECT
+        id,
+        platform,
+        shop_identifier,
+        shop_domain,
+        email,
+        status,
+        installed_at,
+        uninstalled_at,
+        COALESCE(active_at, installed_at) AS active_at,
+        COALESCE(deactivated_at, uninstalled_at) AS deactivated_at,
+        metadata,
+        updated_at
+      FROM app_installations
+      WHERE id = ANY($1::bigint[])
+      ORDER BY id ASC
+    `,
+    [uniqueIds]
+  );
+
+  return attachCurrentMonthTipTotals(
+    result.rows,
+    monthStart || getCurrentMonthStart()
+  );
+}
+
+async function createEmailCampaign({
+  monthStart,
+  ctaUrl,
+  recipientCount,
+  sentByAdminId,
+  status = "created",
+}) {
+  await ensureSchema();
+
+  const result = await sql.query(
+    `
+      INSERT INTO email_campaigns (
+        month_start,
+        cta_url,
+        recipient_count,
+        sent_by_admin_id,
+        status
+      ) VALUES ($1::date, $2, $3, $4, $5)
+      RETURNING *
+    `,
+    [
+      monthStart,
+      ctaUrl,
+      Number(recipientCount || 0),
+      sentByAdminId || null,
+      status,
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function updateEmailCampaignStatus({ campaignId, status }) {
+  await ensureSchema();
+
+  await sql.query(
+    `
+      UPDATE email_campaigns
+      SET status = $2, updated_at = NOW()
+      WHERE id = $1
+    `,
+    [campaignId, status]
+  );
+}
+
+async function insertEmailCampaignRecipient({
+  campaignId,
+  installationId,
+  platform,
+  shopIdentifier,
+  email,
+  tipAmount,
+  currency,
+  status,
+  providerMessageId,
+  error,
+}) {
+  await ensureSchema();
+
+  const result = await sql.query(
+    `
+      INSERT INTO email_campaign_recipients (
+        campaign_id,
+        installation_id,
+        platform,
+        shop_identifier,
+        email,
+        tip_amount,
+        currency,
+        status,
+        provider_message_id,
+        error
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *
+    `,
+    [
+      campaignId,
+      installationId || null,
+      platform,
+      shopIdentifier,
+      email,
+      Number(tipAmount || 0),
+      currency,
+      status,
+      providerMessageId || null,
+      error || null,
+    ]
   );
 
   return result.rows[0] || null;
@@ -488,6 +670,73 @@ async function listWebhookEvents({
   return { rows: rowsResult.rows, total };
 }
 
+async function attachCurrentMonthTipTotals(rows, monthStart) {
+  if (!rows.length) {
+    return rows;
+  }
+
+  const identifiers = rows
+    .map((row) => ({
+      platform: row.platform,
+      shopIdentifier: row.shop_identifier,
+    }))
+    .filter((item) => item.platform && item.shopIdentifier);
+
+  if (!identifiers.length) {
+    return rows.map((row) => withTipSummary(row));
+  }
+
+  const values = [monthStart];
+  const pairClauses = identifiers.map((item, index) => {
+    const platformIndex = index * 2 + 2;
+    const shopIndex = platformIndex + 1;
+    values.push(item.platform, item.shopIdentifier);
+    return `(platform = $${platformIndex} AND shop_identifier = $${shopIndex})`;
+  });
+
+  const result = await sql.query(
+    `
+      SELECT platform, shop_identifier, currency, tip_amount
+      FROM installation_monthly_tip_totals
+      WHERE month_start = $1::date
+        AND (${pairClauses.join(" OR ")})
+      ORDER BY platform ASC, shop_identifier ASC, tip_amount DESC, currency ASC
+    `,
+    values
+  );
+
+  const totalsByShop = new Map();
+  for (const total of result.rows) {
+    const key = `${total.platform}:${total.shop_identifier}`;
+    if (!totalsByShop.has(key)) {
+      totalsByShop.set(key, total);
+    }
+  }
+
+  return rows.map((row) => {
+    const total = totalsByShop.get(`${row.platform}:${row.shop_identifier}`);
+    return withTipSummary(row, total);
+  });
+}
+
+function withTipSummary(row, total) {
+  const hasEmail = Boolean(String(row.email || "").trim());
+  const status = String(row.status || "");
+  return {
+    ...row,
+    current_month_tip_amount: total ? Number(total.tip_amount || 0) : 0,
+    current_month_tip_currency: total?.currency || null,
+    is_selectable_for_email: status === "installed" && hasEmail,
+  };
+}
+
+function getCurrentMonthStart(input = new Date()) {
+  const date = input instanceof Date ? input : new Date(input);
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}-01`;
+}
+
 module.exports = {
   isDbConfigured,
   ensureSchema,
@@ -505,5 +754,10 @@ module.exports = {
   cleanupExpiredAdminSessions,
   listInstallations,
   getInstallationById,
+  upsertInstallationMonthlyTipTotal,
+  getBulkEmailInstallations,
+  createEmailCampaign,
+  updateEmailCampaignStatus,
+  insertEmailCampaignRecipient,
   listWebhookEvents,
 };

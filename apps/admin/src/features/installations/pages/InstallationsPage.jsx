@@ -1,16 +1,24 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { getInstallations } from "../services/installationsService";
+import {
+  getInstallations,
+  sendBulkInstallationEmail,
+} from "../services/installationsService";
 
 import { queryKeys } from "@/shared/constants/queryKeys";
-import { formatDateTime } from "@/shared/utils/formatters";
+import { formatDateTime, formatMoney } from "@/shared/utils/formatters";
 
 
 const PAGE_SIZE = 20;
+const EMPTY_ROWS = [];
 
 export function InstallationsPage() {
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkMessage, setBulkMessage] = useState(null);
   const page = Number(searchParams.get("page") || 1);
   const platform = searchParams.get("platform") || "";
   const status = searchParams.get("status") || "";
@@ -29,8 +37,52 @@ export function InstallationsPage() {
     queryFn: () => getInstallations(filters),
   });
 
-  const rows = data?.data || [];
+  const rows = data?.data || EMPTY_ROWS;
   const meta = data?.meta || { page: 1, totalPages: 1, total: 0 };
+  const selectableRows = useMemo(
+    () => rows.filter((row) => row.is_selectable_for_email),
+    [rows]
+  );
+  const selectableIds = useMemo(
+    () => new Set(selectableRows.map((row) => Number(row.id))),
+    [selectableRows]
+  );
+  const selectedCount = selectedIds.size;
+  const allSelectableSelected =
+    selectableRows.length > 0 &&
+    selectableRows.every((row) => selectedIds.has(Number(row.id)));
+
+  const bulkEmailMutation = useMutation({
+    mutationFn: (ids) => sendBulkInstallationEmail(ids),
+    onSuccess: (payload) => {
+      const sent = payload?.data?.sent ?? 0;
+      const failed = payload?.data?.failed ?? 0;
+      setBulkMessage({
+        type: failed > 0 ? "warning" : "success",
+        text:
+          failed > 0
+            ? `Sent ${sent} email(s), ${failed} failed.`
+            : `Sent ${sent} email(s).`,
+      });
+      setSelectedIds(new Set());
+      queryClient.invalidateQueries({ queryKey: ["installations"] });
+    },
+    onError: (mutationError) => {
+      setBulkMessage({
+        type: "error",
+        text: mutationError.message || "Failed to send bulk email.",
+      });
+    },
+  });
+
+  useEffect(() => {
+    setSelectedIds((current) => {
+      const next = new Set(
+        [...current].filter((id) => selectableIds.has(Number(id)))
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [selectableIds]);
 
   function updateFilters(next) {
     const merged = {
@@ -46,6 +98,38 @@ export function InstallationsPage() {
     if (merged.status) nextParams.set("status", merged.status);
     if (merged.q) nextParams.set("q", merged.q);
     setSearchParams(nextParams, { replace: true });
+  }
+
+  function toggleRow(id) {
+    const numericId = Number(id);
+    if (!selectableIds.has(numericId)) return;
+    setBulkMessage(null);
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(numericId)) {
+        next.delete(numericId);
+      } else {
+        next.add(numericId);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAllCurrentPage() {
+    setBulkMessage(null);
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (allSelectableSelected) {
+        selectableRows.forEach((row) => next.delete(Number(row.id)));
+      } else {
+        selectableRows.forEach((row) => next.add(Number(row.id)));
+      }
+      return next;
+    });
+  }
+
+  function handleSendBulkEmail() {
+    bulkEmailMutation.mutate([...selectedIds]);
   }
 
   return (
@@ -95,23 +179,67 @@ export function InstallationsPage() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-black/10 bg-white p-4">
+        <div>
+          <p className="text-sm font-semibold text-[#1f140a]">
+            Bulk email selected installations
+          </p>
+          <p className="text-sm text-black/60">
+            {selectedCount} selected. Only active installations with an email are selectable.
+          </p>
+        </div>
+        <button
+          className="rounded-lg bg-brand-700 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={selectedCount === 0 || bulkEmailMutation.isPending}
+          onClick={handleSendBulkEmail}
+          type="button"
+        >
+          {bulkEmailMutation.isPending ? "Sending..." : "Send email"}
+        </button>
+      </div>
+
+      {bulkMessage ? (
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm ${
+            bulkMessage.type === "error"
+              ? "border-red-200 bg-red-50 text-red-800"
+              : bulkMessage.type === "warning"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-emerald-200 bg-emerald-50 text-emerald-800"
+          }`}
+        >
+          {bulkMessage.text}
+        </div>
+      ) : null}
+
       <div className="overflow-hidden rounded-xl border border-black/10 bg-white">
         <table className="w-full border-collapse text-sm">
           <thead className="bg-black/[0.03] text-left">
             <tr>
+              <th className="px-4 py-3">
+                <input
+                  aria-label="Select all installations on this page"
+                  checked={allSelectableSelected}
+                  disabled={selectableRows.length === 0}
+                  onChange={toggleSelectAllCurrentPage}
+                  type="checkbox"
+                />
+              </th>
               <th className="px-4 py-3">ID</th>
               <th className="px-4 py-3">Platform</th>
               <th className="px-4 py-3">Shop</th>
               <th className="px-4 py-3">Email</th>
               <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Updated</th>
+              <th className="px-4 py-3">Active Date</th>
+              <th className="px-4 py-3">Deactivate Date</th>
+              <th className="px-4 py-3">Tip Amount</th>
               <th className="px-4 py-3">Detail</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
               <tr>
-                <td className="px-4 py-4 text-black/60" colSpan={7}>
+                <td className="px-4 py-4 text-black/60" colSpan={10}>
                   Loading installations...
                 </td>
               </tr>
@@ -119,7 +247,7 @@ export function InstallationsPage() {
 
             {!isLoading && error ? (
               <tr>
-                <td className="px-4 py-4 text-red-700" colSpan={7}>
+                <td className="px-4 py-4 text-red-700" colSpan={10}>
                   Failed to load installations: {error.message}
                 </td>
               </tr>
@@ -127,7 +255,7 @@ export function InstallationsPage() {
 
             {!isLoading && !error && rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-black/60" colSpan={7}>
+                <td className="px-4 py-4 text-black/60" colSpan={10}>
                   No installation found.
                 </td>
               </tr>
@@ -137,12 +265,31 @@ export function InstallationsPage() {
               !error &&
               rows.map((item) => (
                 <tr className="border-t border-black/10" key={item.id}>
+                  <td className="px-4 py-3">
+                    <input
+                      aria-label={`Select ${item.shop_identifier || item.id}`}
+                      checked={selectedIds.has(Number(item.id))}
+                      disabled={!item.is_selectable_for_email}
+                      onChange={() => toggleRow(item.id)}
+                      title={getSelectionDisabledReason(item)}
+                      type="checkbox"
+                    />
+                  </td>
                   <td className="px-4 py-3">{item.id}</td>
-                  <td className="px-4 py-3">{item.platform}</td>
+                  <td className="px-4 py-3 capitalize">{item.platform}</td>
                   <td className="px-4 py-3">{item.shop_identifier || "-"}</td>
                   <td className="px-4 py-3">{item.email || "-"}</td>
                   <td className="px-4 py-3">{item.status}</td>
-                  <td className="px-4 py-3">{formatDateTime(item.updated_at)}</td>
+                  <td className="px-4 py-3">{formatDateTime(item.active_at)}</td>
+                  <td className="px-4 py-3">
+                    {formatDateTime(item.deactivated_at)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatMoney(
+                      item.current_month_tip_amount,
+                      item.current_month_tip_currency || "USD"
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <Link className="text-brand-700 hover:underline" to={`/installations/${item.id}`}>
                       Open
@@ -177,4 +324,11 @@ export function InstallationsPage() {
       </div>
     </section>
   );
+}
+
+function getSelectionDisabledReason(item) {
+  if (item.is_selectable_for_email) return "";
+  if (item.status !== "installed") return "Only active installations can receive email";
+  if (!item.email) return "Email is missing";
+  return "Not selectable";
 }

@@ -6,9 +6,11 @@ const express = require("express");
 
 const authHelpers = require("./admin-auth");
 const db = require("./db");
+const email = require("./email");
 
 const app = express();
 let dbService = db;
+let emailService = email;
 
 const LOG_DIR = "/tmp/webhooks";
 const MAX_BODY_SIZE = "2mb";
@@ -26,6 +28,13 @@ const COMPLIANCE_TOPICS = new Set([
   "customers/data_request",
   "customers/redact",
   "shop/redact",
+]);
+const SHOPIFY_OAUTH_CALLBACK_HMAC_KEYS = new Set([
+  "code",
+  "host",
+  "shop",
+  "state",
+  "timestamp",
 ]);
 const SUPPORTED_PLATFORMS = new Set(["shopify", "woocommerce"]);
 const SUPPORTED_INSTALLATION_STATUSES = new Set([
@@ -60,8 +69,18 @@ app.get(["/auth/start", "/app", "/app/*"], (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid shop domain" });
     }
 
-    if (req.query.hmac && !isValidShopifyOAuthHmac(secret, req.query)) {
-      return res.status(401).json({ ok: false, error: "Invalid OAuth HMAC" });
+    // Shopify Admin app-launch requests include signed params, but this route is
+    // only used to initiate OAuth. We validate the callback before writing any
+    // installation data, so a launch-time signature mismatch should not block
+    // the redirect into Shopify OAuth.
+    if (
+      req.query.hmac &&
+      !isValidShopifyOAuthHmac(secret, getRawQueryString(req))
+    ) {
+      console.warn("Ignoring invalid launch HMAC on OAuth start", {
+        route: req.path,
+        shop,
+      });
     }
 
     const clientId = getShopifyClientId();
@@ -111,7 +130,14 @@ app.get("/auth/callback", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid shop domain" });
     }
 
-    if (!hmac || !isValidShopifyOAuthHmac(secret, req.query)) {
+    if (
+      !hmac ||
+      !isValidShopifyOAuthHmac(
+        secret,
+        getRawQueryString(req),
+        SHOPIFY_OAUTH_CALLBACK_HMAC_KEYS
+      )
+    ) {
       return res.status(401).json({ ok: false, error: "Invalid OAuth HMAC" });
     }
 
@@ -125,11 +151,15 @@ app.get("/auth/callback", async (req, res) => {
 
     const tokenResp = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
         client_id: clientId,
         client_secret: secret,
         code,
+        expiring: "1",
       }),
     });
 
@@ -151,28 +181,15 @@ app.get("/auth/callback", async (req, res) => {
       });
     }
 
-    const shopResp = await fetch(
-      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/shop.json`,
-      {
-        method: "GET",
-        headers: {
-          "X-Shopify-Access-Token": accessToken,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    if (!shopResp.ok) {
-      const shopBody = await shopResp.text();
+    const shopInfoResult = await fetchShopInfo(shop, accessToken);
+    if (!shopInfoResult.ok) {
       return res.status(502).json({
         ok: false,
         error: "Failed to fetch shop info",
-        detail: shopBody,
+        detail: shopInfoResult.detail,
       });
     }
-
-    const shopJson = await shopResp.json();
-    const shopInfo = shopJson.shop || {};
+    const shopInfo = shopInfoResult.shopInfo;
 
     if (!dbService.isDbConfigured()) {
       return res.status(500).json({
@@ -182,6 +199,7 @@ app.get("/auth/callback", async (req, res) => {
       });
     }
 
+    const installedAt = new Date().toISOString();
     await dbService.upsertInstallation({
       platform: "shopify",
       shopIdentifier: shop,
@@ -189,10 +207,15 @@ app.get("/auth/callback", async (req, res) => {
       email: shopInfo.email || "",
       accessToken,
       status: "installed",
-      installedAt: new Date().toISOString(),
+      installedAt,
       uninstalledAt: null,
+      activeAt: installedAt,
+      deactivatedAt: null,
       metadata: {
         source: "oauth_callback",
+        token_type: tokenJson.token_type || "",
+        access_token_expires_at: getTokenExpiresAt(tokenJson.expires_in),
+        refresh_token_received: Boolean(tokenJson.refresh_token),
         shop_name: shopInfo.name || "",
         myshopify_domain: shopInfo.myshopify_domain || shop,
         query: req.query,
@@ -212,6 +235,44 @@ app.get("/auth/callback", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Auth callback failed" });
   }
 });
+
+app.post(
+  "/internal/tip-totals/monthly",
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
+    if (!isValidInternalRequest(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    if (!dbService.isDbConfigured()) {
+      return res.status(500).json({
+        ok: false,
+        error: "Database is not configured",
+      });
+    }
+
+    try {
+      await dbService.ensureSchema();
+    } catch (error) {
+      console.error("Failed to initialize internal tip total endpoint:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to initialize database",
+      });
+    }
+
+    const payload = parseMonthlyTipTotalPayload(req.body || {});
+    if (!payload.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: payload.error,
+      });
+    }
+
+    const row = await dbService.upsertInstallationMonthlyTipTotal(payload.data);
+    return res.status(200).json({ ok: true, data: row });
+  }
+);
 
 const adminRouter = express.Router();
 adminRouter.use(express.json({ limit: "1mb" }));
@@ -419,6 +480,7 @@ adminRouter.get("/installations", requireAdminAuth, async (req, res) => {
     platform,
     status,
     queryText,
+    monthStart: getCurrentMonthStart(),
     page,
     pageSize,
   });
@@ -433,6 +495,158 @@ adminRouter.get("/installations", requireAdminAuth, async (req, res) => {
       totalPages: Math.max(1, Math.ceil(result.total / pageSize)),
     }
   );
+});
+
+adminRouter.post("/installations/bulk-email", requireAdminAuth, async (req, res) => {
+  const installationIds = Array.isArray(req.body?.installationIds)
+    ? req.body.installationIds
+    : [];
+  const uniqueIds = [...new Set(installationIds.map((id) => Number(id)))].filter(
+    (id) => Number.isFinite(id) && id > 0
+  );
+
+  if (uniqueIds.length === 0) {
+    return sendAdminError(
+      res,
+      400,
+      "INVALID_INSTALLATION_IDS",
+      "installationIds must contain at least one positive id"
+    );
+  }
+
+  const monthStart = getCurrentMonthStart();
+  const installations = await dbService.getBulkEmailInstallations({
+    installationIds: uniqueIds,
+    monthStart,
+  });
+  const foundIds = new Set(installations.map((row) => Number(row.id)));
+  const missingIds = uniqueIds.filter((id) => !foundIds.has(id));
+  if (missingIds.length > 0) {
+    return sendAdminError(
+      res,
+      404,
+      "INSTALLATION_NOT_FOUND",
+      "Some selected installations were not found",
+      { missingIds }
+    );
+  }
+
+  const invalidRecipients = installations
+    .filter((row) => row.status !== "installed" || !String(row.email || "").trim())
+    .map((row) => ({
+      id: row.id,
+      status: row.status,
+      email: row.email || null,
+      reason:
+        row.status !== "installed"
+          ? "Installation is not active"
+          : "Installation has no email",
+    }));
+
+  if (invalidRecipients.length > 0) {
+    return sendAdminError(
+      res,
+      400,
+      "INVALID_EMAIL_RECIPIENTS",
+      "Only active installations with an email can receive bulk email",
+      invalidRecipients
+    );
+  }
+
+  const emailConfig = emailService.getEmailRuntimeConfig(process.env);
+  if (!emailConfig.ok) {
+    return sendAdminError(
+      res,
+      500,
+      "EMAIL_CONFIG_MISSING",
+      "Email sending is not configured",
+      { missing: emailConfig.missing }
+    );
+  }
+
+  const campaign = await dbService.createEmailCampaign({
+    monthStart,
+    ctaUrl: emailConfig.ctaUrl,
+    recipientCount: installations.length,
+    sentByAdminId: req.adminUser.id,
+    status: "sending",
+  });
+  const transport = emailService.createEmailTransport(emailConfig);
+  const monthLabel = formatMonthLabel(monthStart);
+  const recipientResults = [];
+
+  for (const installation of installations) {
+    const tipAmount = Number(installation.current_month_tip_amount || 0);
+    const currency = installation.current_month_tip_currency || "USD";
+    const shopName = installation.metadata?.shop_name || "";
+    try {
+      const info = await emailService.sendMonthlyTipEmail({
+        transport,
+        from: emailConfig.from,
+        to: installation.email,
+        shopName,
+        shopDomain: installation.shop_domain || installation.shop_identifier,
+        amount: tipAmount,
+        currency,
+        ctaUrl: emailConfig.ctaUrl,
+        monthLabel,
+      });
+
+      await dbService.insertEmailCampaignRecipient({
+        campaignId: campaign.id,
+        installationId: installation.id,
+        platform: installation.platform,
+        shopIdentifier: installation.shop_identifier,
+        email: installation.email,
+        tipAmount,
+        currency,
+        status: "sent",
+        providerMessageId: info?.messageId || "",
+      });
+
+      recipientResults.push({
+        installationId: installation.id,
+        email: installation.email,
+        status: "sent",
+      });
+    } catch (error) {
+      const message = error?.message || "Failed to send email";
+      await dbService.insertEmailCampaignRecipient({
+        campaignId: campaign.id,
+        installationId: installation.id,
+        platform: installation.platform,
+        shopIdentifier: installation.shop_identifier,
+        email: installation.email,
+        tipAmount,
+        currency,
+        status: "failed",
+        error: message,
+      });
+
+      recipientResults.push({
+        installationId: installation.id,
+        email: installation.email,
+        status: "failed",
+        error: message,
+      });
+    }
+  }
+
+  const sent = recipientResults.filter((row) => row.status === "sent").length;
+  const failed = recipientResults.length - sent;
+  const campaignStatus =
+    failed === 0 ? "sent" : sent > 0 ? "partial_failed" : "failed";
+  await dbService.updateEmailCampaignStatus({
+    campaignId: campaign.id,
+    status: campaignStatus,
+  });
+
+  return sendAdminSuccess(res, {
+    campaignId: campaign.id,
+    sent,
+    failed,
+    recipients: recipientResults,
+  });
 });
 
 adminRouter.get("/installations/:id", requireAdminAuth, async (req, res) => {
@@ -734,7 +948,106 @@ function sanitizeInstallationRow(row) {
     access_token: undefined,
     has_access_token: Boolean(accessToken),
     access_token_preview: accessTokenPreview,
+    active_at: row.active_at || row.installed_at || null,
+    deactivated_at: row.deactivated_at || row.uninstalled_at || null,
+    current_month_tip_amount: Number(row.current_month_tip_amount || 0),
+    current_month_tip_currency: row.current_month_tip_currency || null,
+    is_selectable_for_email:
+      row.is_selectable_for_email !== undefined
+        ? Boolean(row.is_selectable_for_email)
+        : row.status === "installed" && Boolean(String(row.email || "").trim()),
   };
+}
+
+function isValidInternalRequest(req) {
+  const expectedToken = String(process.env.INTERNAL_SYNC_SECRET || "").trim();
+  if (!expectedToken) {
+    return false;
+  }
+
+  const receivedToken = String(
+    req.get("x-snaptip-internal-token") || req.get("authorization") || ""
+  )
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+
+  if (!receivedToken) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expectedToken);
+  const receivedBuffer = Buffer.from(receivedToken);
+  if (expectedBuffer.length !== receivedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
+}
+
+function parseMonthlyTipTotalPayload(body) {
+  const platform = parsePlatform(body.platform);
+  const shopIdentifier = String(body.shop_identifier || body.shopIdentifier || "")
+    .trim()
+    .toLowerCase();
+  const monthStart = normalizeMonthStart(body.month_start || body.monthStart);
+  const currency = String(body.currency || "")
+    .trim()
+    .toUpperCase();
+  const tipAmount = Number(body.tip_amount ?? body.tipAmount);
+
+  if (!platform) {
+    return { ok: false, error: "platform must be shopify or woocommerce" };
+  }
+  if (!shopIdentifier) {
+    return { ok: false, error: "shop_identifier is required" };
+  }
+  if (!monthStart) {
+    return { ok: false, error: "month_start must be a valid date" };
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    return { ok: false, error: "currency must be a 3-letter ISO code" };
+  }
+  if (!Number.isFinite(tipAmount) || tipAmount < 0) {
+    return { ok: false, error: "tip_amount must be a non-negative number" };
+  }
+
+  return {
+    ok: true,
+    data: {
+      platform,
+      shopIdentifier,
+      monthStart,
+      currency,
+      tipAmount,
+    },
+  };
+}
+
+function normalizeMonthStart(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}-01`;
+}
+
+function getCurrentMonthStart(date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}-01`;
+}
+
+function formatMonthLabel(monthStart) {
+  const date = new Date(`${monthStart}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) {
+    return "this month";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
 }
 
 function clampPositiveInt(input, fallback, max = 1000) {
@@ -883,23 +1196,114 @@ function getAppBaseUrl(req) {
   return `${forwardedProto}://${host}`;
 }
 
-function isValidShopifyOAuthHmac(secret, query) {
-  const { hmac, signature: _signature, ...rest } = query || {};
-  if (!hmac) return false;
+async function fetchShopInfo(shop, accessToken) {
+  const response = await fetch(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        query: `#graphql
+          query SnapTipShopInfo {
+            shop {
+              name
+              email
+              myshopifyDomain
+            }
+          }
+        `,
+      }),
+    }
+  );
 
-  const message = Object.keys(rest)
-    .sort()
-    .map((key) => {
-      const value = Array.isArray(rest[key])
-        ? rest[key].join(",")
-        : String(rest[key]);
-      return `${key}=${value}`;
-    })
-    .join("&");
+  const bodyText = await response.text();
+  if (!response.ok) {
+    return { ok: false, detail: bodyText };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    return { ok: false, detail: bodyText };
+  }
+
+  if (payload.errors) {
+    return { ok: false, detail: JSON.stringify(payload.errors) };
+  }
+
+  const shopNode = payload?.data?.shop;
+  if (!shopNode) {
+    return { ok: false, detail: "GraphQL response missing data.shop" };
+  }
+
+  return {
+    ok: true,
+    shopInfo: {
+      email: shopNode.email || "",
+      name: shopNode.name || "",
+      myshopify_domain: shopNode.myshopifyDomain || shop,
+    },
+  };
+}
+
+function getTokenExpiresAt(expiresIn) {
+  const seconds = Number(expiresIn);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+function getRawQueryString(req) {
+  const originalUrl = String(req.originalUrl || req.url || "");
+  const queryIndex = originalUrl.indexOf("?");
+  if (queryIndex === -1) return "";
+  return originalUrl.slice(queryIndex + 1);
+}
+
+function isValidShopifyOAuthHmac(secret, rawQueryString, allowedKeys = null) {
+  if (!rawQueryString) return false;
+
+  const messageParts = [];
+  let receivedHmac = "";
+
+  for (const chunk of String(rawQueryString).split("&")) {
+    if (!chunk) continue;
+
+    const separatorIndex = chunk.indexOf("=");
+    const rawKey = separatorIndex === -1 ? chunk : chunk.slice(0, separatorIndex);
+    const rawValue = separatorIndex === -1 ? "" : chunk.slice(separatorIndex + 1);
+    const decodedKey = decodeURIComponent(rawKey.replace(/\+/g, "%20"));
+
+    if (decodedKey === "hmac") {
+      receivedHmac = decodeURIComponent(rawValue.replace(/\+/g, "%20"));
+      continue;
+    }
+
+    if (decodedKey === "signature") {
+      continue;
+    }
+
+    if (allowedKeys && !allowedKeys.has(decodedKey)) {
+      continue;
+    }
+
+    messageParts.push(`${rawKey}=${rawValue}`);
+  }
+
+  if (!receivedHmac) return false;
+
+  const message = messageParts.sort().join("&");
 
   const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
   const digestBuffer = Buffer.from(digest, "utf8");
-  const hmacBuffer = Buffer.from(String(hmac), "utf8");
+  const hmacBuffer = Buffer.from(receivedHmac, "utf8");
   if (digestBuffer.length !== hmacBuffer.length) return false;
   return crypto.timingSafeEqual(digestBuffer, hmacBuffer);
 }
@@ -941,6 +1345,14 @@ app.setDbServiceForTests = (nextDbService) => {
 app.resetDbServiceForTests = () => {
   dbService = db;
   adminSeedPromise = null;
+};
+
+app.setEmailServiceForTests = (nextEmailService) => {
+  emailService = nextEmailService;
+};
+
+app.resetEmailServiceForTests = () => {
+  emailService = email;
 };
 
 module.exports = app;
