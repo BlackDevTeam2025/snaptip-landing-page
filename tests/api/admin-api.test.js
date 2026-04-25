@@ -8,6 +8,7 @@ process.env.ADMIN_PASSWORD = "AdminPassword123!";
 process.env.SHOPIFY_API_SECRET = "test-secret";
 process.env.SHOPIFY_API_KEY = "test-client-id";
 process.env.APP_BASE_URL = "https://snaptip.tech";
+process.env.SHOPIFY_EMBEDDED_APP_URL = "https://app.snaptip.tech";
 process.env.INTERNAL_SYNC_SECRET = "internal-secret";
 process.env.SMTP_HOST = "smtp.example.com";
 process.env.SMTP_PORT = "587";
@@ -137,7 +138,6 @@ describe("admin-api integration", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
     expect(response.body.meta.page).toBe(2);
     expect(response.body.meta.pageSize).toBe(5);
     expect(mockDb.listInstallations).toHaveBeenCalledWith({
@@ -163,7 +163,6 @@ describe("admin-api integration", () => {
       });
 
     expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
     expect(mockDb.upsertInstallationMonthlyTipTotal).toHaveBeenCalledWith({
       platform: "woocommerce",
       shopIdentifier: "store.example.com",
@@ -214,7 +213,6 @@ describe("admin-api integration", () => {
       .send({ installationIds: [10] });
 
     expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
     expect(response.body.data.sent).toBe(1);
     expect(mockDb.createEmailCampaign).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -295,7 +293,6 @@ describe("admin-api integration", () => {
 
     const response = await agent.get("/admin-api/webhooks?page=1&pageSize=20");
     expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
     expect(response.body.data).toHaveLength(1);
     expect(response.body.data[0].payload_preview).toContain("{\"test\":true}");
   });
@@ -389,8 +386,10 @@ describe("admin-api integration", () => {
 
     const response = await request(app).get(`/auth/callback?${query}`);
 
-    expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe(
+      "https://app.snaptip.tech/?shop=demo.myshopify.com&host=YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvZGVtby1zdG9yZQ&embedded=1"
+    );
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "https://demo.myshopify.com/admin/oauth/access_token",

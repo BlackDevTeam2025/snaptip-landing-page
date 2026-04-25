@@ -15,11 +15,16 @@ SnapTip landing site + webhook backend + internal admin dashboard.
 - `/admin/*`: admin React app
 - `/admin-api/*`: admin backend APIs
 
+The merchant-facing Shopify embedded app UI is deployed separately at
+`https://app.snaptip.tech`. This landing/backend project only handles OAuth,
+webhooks, the public website, and the internal SnapTip admin.
+
 ## Required Env
 Copy `.env.example` and configure:
 - `POSTGRES_URL` (or `POSTGRES_PRISMA_URL` / `POSTGRES_URL_NON_POOLING`)
 - `SHOPIFY_API_SECRET`
 - `SHOPIFY_API_KEY`
+- `SHOPIFY_EMBEDDED_APP_URL` (defaults to `https://app.snaptip.tech`)
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 - `INTERNAL_SYNC_SECRET`
@@ -44,6 +49,7 @@ Copy `.env.example` and configure:
 - Shopify does not send an `app installed` webhook.
 - SnapTip treats `GET /auth/callback` as the install ingestion point.
 - Successful OAuth callback writes the Shopify shop into `app_installations` with `status=installed`, `active_at`, and shop metadata.
+- After saving the installation, OAuth redirects the merchant to `SHOPIFY_EMBEDDED_APP_URL` with `shop`, `host`, and `embedded=1` query params.
 - `POST /webhooks/app/uninstalled` is used later to mark `status=uninstalled` and set `deactivated_at`.
 
 ## Two-lane test flow
@@ -60,17 +66,19 @@ Use this lane when you want to test the landing/admin backend end-to-end.
 1. Make sure the Shopify app config is deployed with:
    - `application_url = "https://snaptip.tech/auth/start"`
    - `redirect_urls = [ "https://snaptip.tech/auth/callback" ]`
+   - `SHOPIFY_EMBEDDED_APP_URL=https://app.snaptip.tech`
 2. Uninstall the app from the dev store.
 3. Install it again so the shop goes through `https://snaptip.tech/auth/start`.
-4. Verify the row appears in `https://snaptip.tech/admin` → `Installations`.
-5. Seed the current month tip amount:
+4. Verify Shopify redirects to `https://app.snaptip.tech/?shop=...`.
+5. Verify the row appears in `https://snaptip.tech/admin` → `Installations`.
+6. Seed the current month tip amount:
 
 ```bash
 npm run test:seed-tip -- --platform shopify --shop miahn-2.myshopify.com --amount 123.45 --currency USD
 ```
 
-6. In Admin `Installations`, select the active row and send the monthly email.
-7. Uninstall the app again to verify `deactivated_at` and uninstall status.
+7. In Admin `Installations`, select the active row and send the monthly email.
+8. Uninstall the app again to verify `deactivated_at` and uninstall status.
 
 ## Important warning about `shopify app dev`
 - Running `shopify app dev` on the same Shopify app can temporarily switch the remote app URL to the CLI tunnel.

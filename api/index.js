@@ -15,6 +15,7 @@ let emailService = email;
 const LOG_DIR = "/tmp/webhooks";
 const MAX_BODY_SIZE = "2mb";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
+const DEFAULT_EMBEDDED_APP_URL = "https://app.snaptip.tech";
 const SHOPIFY_SCOPES = String(
   process.env.SHOPIFY_SCOPES ||
     "read_orders,read_publications,write_cart_transforms,write_products,write_publications"
@@ -222,14 +223,21 @@ app.get("/auth/callback", async (req, res) => {
       },
     });
 
-    return res.status(200).json({
-      ok: true,
-      route: "/auth/callback",
-      message: "Shop installed and saved",
-      shop: shopInfo.myshopify_domain || shop,
-      email: shopInfo.email || null,
-      platform: "shopify",
-    });
+    const installedShop = shopInfo.myshopify_domain || shop;
+    const wantsDebugJson = shouldReturnOAuthDebugJson(req);
+    if (wantsDebugJson) {
+      return res.status(200).json({
+        ok: true,
+        route: "/auth/callback",
+        message: "Shop installed and saved",
+        shop: installedShop,
+        email: shopInfo.email || null,
+        platform: "shopify",
+      });
+    }
+
+    const redirectUrl = getPostInstallRedirectUrl(req, installedShop);
+    return res.redirect(302, redirectUrl);
   } catch (error) {
     console.error("Auth callback error:", error);
     return res.status(500).json({ ok: false, error: "Auth callback failed" });
@@ -1194,6 +1202,105 @@ function getAppBaseUrl(req) {
   const forwardedProto = req.get("x-forwarded-proto") || req.protocol || "https";
   const host = req.get("x-forwarded-host") || req.get("host");
   return `${forwardedProto}://${host}`;
+}
+
+function getPostInstallRedirectUrl(req, shop) {
+  const configuredTarget = getEmbeddedAppUrl();
+  const appBaseUrl = getAppBaseUrl(req);
+  const fallbackTarget = new URL(DEFAULT_EMBEDDED_APP_URL);
+
+  let target;
+  if (configuredTarget) {
+    try {
+      target = new URL(configuredTarget);
+    } catch {
+      const normalizedPath = configuredTarget.startsWith("/")
+        ? configuredTarget
+        : `/${configuredTarget}`;
+      target = new URL(normalizedPath, `${appBaseUrl}/`);
+    }
+  } else {
+    target = fallbackTarget;
+  }
+
+  if (isAuthRouteTarget(target)) {
+    target = fallbackTarget;
+  }
+
+  const isShopifyAdminTarget = target.hostname === "admin.shopify.com";
+  if (!isShopifyAdminTarget && shop) target.searchParams.set("shop", shop);
+
+  const host = String(req.query.host || "").trim();
+  if (!isShopifyAdminTarget && host) {
+    target.searchParams.set("host", host);
+  }
+  if (!isShopifyAdminTarget) {
+    target.searchParams.set("embedded", "1");
+  }
+
+  return target.toString();
+}
+
+function getEmbeddedAppUrl() {
+  return String(
+    process.env.SHOPIFY_EMBEDDED_APP_URL ||
+      process.env.SHOPIFY_APP_UI_URL ||
+      process.env.SHOPIFY_POST_INSTALL_URL ||
+      DEFAULT_EMBEDDED_APP_URL
+  ).trim();
+}
+
+function shouldReturnOAuthDebugJson(req) {
+  if (req.query.host || req.query.embedded) return false;
+
+  const isProduction = String(process.env.NODE_ENV || "").trim() === "production";
+  if (isProduction) return false;
+
+  const debugEnabled = String(process.env.SHOPIFY_DEBUG_CALLBACK_JSON || "").trim() === "1";
+  return debugEnabled && String(req.query.debug || "").trim() === "1";
+}
+
+function isAuthRouteTarget(targetUrl) {
+  return targetUrl.pathname === "/auth/start" || targetUrl.pathname === "/auth/callback";
+}
+
+function getShopifyAppHandle() {
+  return String(process.env.SHOPIFY_APP_HANDLE || "snaptip")
+    .trim()
+    .toLowerCase();
+}
+
+function getShopifyAdminStorePath(req, shop) {
+  const hostParam = String(req.query.host || "").trim();
+  const decodedHost = decodeShopifyHost(hostParam);
+  if (decodedHost) {
+    const [hostName, ...pathParts] = decodedHost.split("/");
+    if (hostName === "admin.shopify.com" && pathParts[0] === "store" && pathParts[1]) {
+      return `store/${pathParts[1]}`;
+    }
+  }
+
+  const storeHandle = getStoreHandleFromShop(shop);
+  return storeHandle ? `store/${storeHandle}` : "";
+}
+
+function decodeShopifyHost(rawValue) {
+  if (!rawValue) return "";
+  const normalized = rawValue.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  try {
+    return Buffer.from(padded, "base64").toString("utf8").replace(/^https?:\/\//, "");
+  } catch {
+    return "";
+  }
+}
+
+function getStoreHandleFromShop(shop) {
+  const match = String(shop || "")
+    .trim()
+    .toLowerCase()
+    .match(/^([a-z0-9-]+)\.myshopify\.com$/);
+  return match ? match[1] : "";
 }
 
 async function fetchShopInfo(shop, accessToken) {
