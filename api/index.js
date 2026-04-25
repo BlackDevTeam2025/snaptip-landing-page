@@ -223,20 +223,7 @@ app.get("/auth/callback", async (req, res) => {
       },
     });
 
-    const installedShop = shopInfo.myshopify_domain || shop;
-    const wantsDebugJson = shouldReturnOAuthDebugJson(req);
-    if (wantsDebugJson) {
-      return res.status(200).json({
-        ok: true,
-        route: "/auth/callback",
-        message: "Shop installed and saved",
-        shop: installedShop,
-        email: shopInfo.email || null,
-        platform: "shopify",
-      });
-    }
-
-    const redirectUrl = getPostInstallRedirectUrl(req, installedShop);
+    const redirectUrl = getPostInstallRedirectUrl(req, shopInfo.myshopify_domain || shop);
     return res.redirect(302, redirectUrl);
   } catch (error) {
     console.error("Auth callback error:", error);
@@ -1248,16 +1235,6 @@ function getEmbeddedAppUrl() {
       process.env.SHOPIFY_POST_INSTALL_URL ||
       DEFAULT_EMBEDDED_APP_URL
   ).trim();
-}
-
-function shouldReturnOAuthDebugJson(req) {
-  if (req.query.host || req.query.embedded) return false;
-
-  const isProduction = String(process.env.NODE_ENV || "").trim() === "production";
-  if (isProduction) return false;
-
-  const debugEnabled = String(process.env.SHOPIFY_DEBUG_CALLBACK_JSON || "").trim() === "1";
-  return debugEnabled && String(req.query.debug || "").trim() === "1";
 }
 
 function isAuthRouteTarget(targetUrl) {
