@@ -5,3 +5,7 @@ npm-debug.log*
 /dist/
 coverage/
 .vercel
+
+# This repo needs build/utility scripts in Vercel.
+!/scripts/
+!/scripts/*.js
