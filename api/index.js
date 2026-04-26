@@ -232,6 +232,68 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 app.post(
+  "/internal/installations/shopify",
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
+    if (!isValidInternalRequest(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    if (!dbService.isDbConfigured()) {
+      return res.status(500).json({
+        ok: false,
+        error: "Database is not configured",
+      });
+    }
+
+    try {
+      await dbService.ensureSchema();
+    } catch (error) {
+      console.error("Failed to initialize Shopify installation sync:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to initialize database",
+      });
+    }
+
+    const payload = parseShopifyInstallationSyncPayload(req.body || {});
+    if (!payload.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: payload.error,
+      });
+    }
+
+    const syncedAt = new Date().toISOString();
+    await dbService.upsertInstallation({
+      platform: "shopify",
+      shopIdentifier: payload.data.shop,
+      shopDomain: payload.data.shopDomain || payload.data.shop,
+      email: payload.data.email || null,
+      accessToken: null,
+      status: "installed",
+      installedAt: syncedAt,
+      uninstalledAt: null,
+      activeAt: syncedAt,
+      deactivatedAt: null,
+      metadata: {
+        source: payload.data.source || "embedded_app_sync",
+        shop_name: payload.data.name || "",
+        myshopify_domain: payload.data.myshopifyDomain || payload.data.shop,
+        scope: payload.data.scope || "",
+        synced_at: syncedAt,
+      },
+    });
+
+    return res.status(200).json({
+      ok: true,
+      platform: "shopify",
+      shop: payload.data.shop,
+    });
+  }
+);
+
+app.post(
   "/internal/tip-totals/monthly",
   express.json({ limit: "1mb" }),
   async (req, res) => {
@@ -1014,6 +1076,48 @@ function parseMonthlyTipTotalPayload(body) {
       monthStart,
       currency,
       tipAmount,
+    },
+  };
+}
+
+function parseShopifyInstallationSyncPayload(body) {
+  const shop = String(body.shop || body.shop_identifier || body.shopIdentifier || "")
+    .trim()
+    .toLowerCase();
+  const shopDomain = String(body.shop_domain || body.shopDomain || shop)
+    .trim()
+    .toLowerCase();
+  const email = String(body.email || "").trim();
+  const name = String(body.name || body.shop_name || body.shopName || "").trim();
+  const myshopifyDomain = String(body.myshopify_domain || body.myshopifyDomain || shop)
+    .trim()
+    .toLowerCase();
+  const scope = String(body.scope || "").trim();
+  const source = String(body.source || "").trim();
+
+  if (!shop || !isValidShopifyDomain(shop)) {
+    return { ok: false, error: "shop must be a valid myshopify.com domain" };
+  }
+  if (shopDomain && !isValidShopifyDomain(shopDomain)) {
+    return { ok: false, error: "shop_domain must be a valid myshopify.com domain" };
+  }
+  if (myshopifyDomain && !isValidShopifyDomain(myshopifyDomain)) {
+    return {
+      ok: false,
+      error: "myshopify_domain must be a valid myshopify.com domain",
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      shop,
+      shopDomain,
+      email,
+      name,
+      myshopifyDomain,
+      scope,
+      source,
     },
   };
 }
