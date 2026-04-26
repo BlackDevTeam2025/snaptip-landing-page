@@ -805,18 +805,23 @@ app.post("/webhooks/app/scopes_update", async (req, res) => {
 
 app.post("/webhooks/compliance", async (req, res) => {
   const topic = getShopifyTopic(req);
-  if (!COMPLIANCE_TOPICS.has(topic)) {
-    return res.status(400).json({
-      ok: false,
-      error: "Unsupported compliance topic",
-      topic,
-    });
-  }
-
-  const normalized = `compliance_${normalizeTopic(topic)}`;
   await handleWebhook(req, res, {
-    eventName: normalized,
+    eventName: `compliance_${normalizeTopic(topic || "unknown")}`,
     platform: "shopify",
+    validateTopic: (verifiedTopic) => {
+      if (COMPLIANCE_TOPICS.has(verifiedTopic)) {
+        return null;
+      }
+
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          error: "Unsupported compliance topic",
+          topic: verifiedTopic,
+        },
+      };
+    },
   });
 });
 
@@ -1179,7 +1184,7 @@ function getRequestIp(req) {
   return req.ip || "";
 }
 
-async function handleWebhook(req, res, { eventName, platform }) {
+async function handleWebhook(req, res, { eventName, platform, validateTopic }) {
   const secret = process.env.SHOPIFY_API_SECRET;
   if (!secret) {
     return res.status(500).json({
@@ -1198,6 +1203,15 @@ async function handleWebhook(req, res, { eventName, platform }) {
   }
 
   const topic = getShopifyTopic(req);
+  if (validateTopic) {
+    const validationError = validateTopic(topic);
+    if (validationError) {
+      return res
+        .status(validationError.status || 400)
+        .json(validationError.body || validationError);
+    }
+  }
+
   const shop = req.get("x-shopify-shop-domain") || "";
   const payloadText = rawBody.toString("utf8");
   const headers = {
