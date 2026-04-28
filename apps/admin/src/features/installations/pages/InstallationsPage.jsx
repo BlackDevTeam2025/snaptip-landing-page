@@ -57,14 +57,36 @@ export function InstallationsPage() {
     onSuccess: (payload) => {
       const sent = payload?.data?.sent ?? 0;
       const failed = payload?.data?.failed ?? 0;
+      const recipients = Array.isArray(payload?.data?.recipients)
+        ? payload.data.recipients
+        : [];
+      const failedRecipients = recipients.filter(
+        (recipient) => recipient?.status === "failed"
+      );
+      const failureDetails = failedRecipients
+        .slice(0, 3)
+        .map((recipient) => {
+          const email = recipient?.email || `installation #${recipient?.installationId}`;
+          const reason = recipient?.error || "Unknown error";
+          return `${email}: ${reason}`;
+        })
+        .join(" ");
       setBulkMessage({
         type: failed > 0 ? "warning" : "success",
         text:
           failed > 0
-            ? `Sent ${sent} email(s), ${failed} failed.`
+            ? `Sent ${sent} email(s), ${failed} failed.${failureDetails ? ` ${failureDetails}` : ""}`
             : `Sent ${sent} email(s).`,
       });
-      setSelectedIds(new Set());
+      setSelectedIds(
+        failed > 0
+          ? new Set(
+              failedRecipients
+                .map((recipient) => Number(recipient?.installationId))
+                .filter((id) => Number.isFinite(id) && id > 0)
+            )
+          : new Set()
+      );
       queryClient.invalidateQueries({ queryKey: ["installations"] });
     },
     onError: (mutationError) => {

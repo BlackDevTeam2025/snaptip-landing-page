@@ -1359,45 +1359,6 @@ function isAuthRouteTarget(targetUrl) {
   return targetUrl.pathname === "/auth/start" || targetUrl.pathname === "/auth/callback";
 }
 
-function getShopifyAppHandle() {
-  return String(process.env.SHOPIFY_APP_HANDLE || "snaptip")
-    .trim()
-    .toLowerCase();
-}
-
-function getShopifyAdminStorePath(req, shop) {
-  const hostParam = String(req.query.host || "").trim();
-  const decodedHost = decodeShopifyHost(hostParam);
-  if (decodedHost) {
-    const [hostName, ...pathParts] = decodedHost.split("/");
-    if (hostName === "admin.shopify.com" && pathParts[0] === "store" && pathParts[1]) {
-      return `store/${pathParts[1]}`;
-    }
-  }
-
-  const storeHandle = getStoreHandleFromShop(shop);
-  return storeHandle ? `store/${storeHandle}` : "";
-}
-
-function decodeShopifyHost(rawValue) {
-  if (!rawValue) return "";
-  const normalized = rawValue.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  try {
-    return Buffer.from(padded, "base64").toString("utf8").replace(/^https?:\/\//, "");
-  } catch {
-    return "";
-  }
-}
-
-function getStoreHandleFromShop(shop) {
-  const match = String(shop || "")
-    .trim()
-    .toLowerCase()
-    .match(/^([a-z0-9-]+)\.myshopify\.com$/);
-  return match ? match[1] : "";
-}
-
 async function fetchShopInfo(shop, accessToken) {
   const response = await fetch(
     `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,

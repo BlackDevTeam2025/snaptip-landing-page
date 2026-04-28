@@ -31,10 +31,30 @@ Copy `.env.example` and configure:
 - SMTP envs if you want bulk email to send for real:
   - `SMTP_HOST`
   - `SMTP_PORT`
+  - `SMTP_SECURE`
   - `SMTP_USER`
   - `SMTP_PASS`
   - `SMTP_FROM_EMAIL`
+  - `SMTP_FROM_NAME`
   - `SNAPTIP_EMAIL_CTA_URL`
+
+### Gmail SMTP example
+For a Gmail mailbox using an App Password:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=your-account@gmail.com
+SMTP_PASS=your-16-char-app-password
+SMTP_FROM_EMAIL=your-account@gmail.com
+SMTP_FROM_NAME=SnapTip
+SNAPTIP_EMAIL_CTA_URL=https://snaptip.tech/tip
+```
+
+Notes:
+- `SMTP_FROM_EMAIL` should match the authenticated Gmail account.
+- Gmail also works on `SMTP_PORT=587` with `SMTP_SECURE=false`.
 
 ## Scripts
 - `npm run dev`: run API + admin dev server

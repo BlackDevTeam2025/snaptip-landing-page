@@ -153,4 +153,52 @@ describe("InstallationsPage", () => {
     );
     expect(await screen.findByText("Sent 1 email(s).")).toBeInTheDocument();
   });
+
+  it("shows failed recipient detail and keeps failed rows selected", async () => {
+    getInstallations.mockResolvedValue({
+      data: [
+        {
+          id: 1,
+          platform: "shopify",
+          shop_identifier: "demo.myshopify.com",
+          email: "merchant@example.com",
+          status: "installed",
+          current_month_tip_amount: 0,
+          current_month_tip_currency: "USD",
+          is_selectable_for_email: true,
+        },
+      ],
+      meta: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+    });
+    sendBulkInstallationEmail.mockResolvedValue({
+      data: {
+        sent: 0,
+        failed: 1,
+        recipients: [
+          {
+            installationId: 1,
+            email: "merchant@example.com",
+            status: "failed",
+            error: "Unexpected socket close",
+          },
+        ],
+      },
+    });
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByText("demo.myshopify.com")).toBeInTheDocument()
+    );
+    const rowCheckbox = screen.getByLabelText("Select demo.myshopify.com");
+    fireEvent.click(rowCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: "Send email" }));
+
+    expect(
+      await screen.findByText(
+        "Sent 0 email(s), 1 failed. merchant@example.com: Unexpected socket close"
+      )
+    ).toBeInTheDocument();
+    expect(rowCheckbox).toBeChecked();
+  });
 });
