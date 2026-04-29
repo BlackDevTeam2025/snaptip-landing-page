@@ -28,6 +28,7 @@ Copy `.env.example` and configure:
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 - `INTERNAL_SYNC_SECRET`
+- `WOOCOMMERCE_SYNC_TOKEN_SECRET`
 - SMTP envs if you want bulk email to send for real:
   - `SMTP_HOST`
   - `SMTP_PORT`
@@ -71,6 +72,13 @@ Notes:
 - Successful OAuth callback writes the Shopify shop into `app_installations` with `status=installed`, `active_at`, and shop metadata.
 - After saving the installation, OAuth redirects the merchant to `SHOPIFY_EMBEDDED_APP_URL` with `shop`, `host`, and `embedded=1` query params.
 - `POST /webhooks/app/uninstalled` is used later to mark `status=uninstalled` and set `deactivated_at`.
+
+## WooCommerce plugin sync
+- `POST /internal/installations/woocommerce` accepts WooCommerce plugin install/settings retries and upserts `app_installations` with `platform=woocommerce`.
+- The WooCommerce install payload should include `shop_identifier` or a site URL. SnapTip normalizes this to the site hostname and may store optional store metadata: `shop_domain`, `email`, `name`, `currency`, and `source`.
+- The install response returns a per-site `sync_token` derived server-side from `WOOCOMMERCE_SYNC_TOKEN_SECRET`. The public plugin should store that token and send it as `x-snaptip-site-token`; do not hardcode `INTERNAL_SYNC_SECRET` in the plugin.
+- `POST /internal/tip-totals/monthly` accepts WooCommerce monthly tip totals with the per-site token. Payloads send an absolute monthly total, not a delta: `platform=woocommerce`, `shop_identifier`, `month_start`, `currency`, and `tip_amount`.
+- The WooCommerce v0.2.0 sync only sends store metadata and monthly tip totals to `snaptip.tech`. It does not send customer names, customer emails, order line items, or per-order audit data.
 
 ## Two-lane test flow
 Use two separate lanes instead of trying to force local dev and production install tracking through the same URL.

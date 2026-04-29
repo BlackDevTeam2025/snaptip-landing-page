@@ -294,10 +294,87 @@ app.post(
 );
 
 app.post(
+  "/internal/installations/woocommerce",
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
+    if (!dbService.isDbConfigured()) {
+      return res.status(500).json({
+        ok: false,
+        error: "Database is not configured",
+      });
+    }
+
+    try {
+      await dbService.ensureSchema();
+    } catch (error) {
+      console.error("Failed to initialize WooCommerce installation sync:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to initialize database",
+      });
+    }
+
+    const payload = parseWooCommerceInstallationSyncPayload(req.body || {});
+    if (!payload.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: payload.error,
+      });
+    }
+
+    let siteToken;
+    try {
+      siteToken = createWooCommerceSiteToken(payload.data.shopIdentifier);
+    } catch (error) {
+      console.error("Failed to create WooCommerce sync token:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "WooCommerce sync token is not configured",
+      });
+    }
+
+    const syncedAt = new Date().toISOString();
+    await dbService.upsertInstallation({
+      platform: "woocommerce",
+      shopIdentifier: payload.data.shopIdentifier,
+      shopDomain: payload.data.shopDomain || payload.data.shopIdentifier,
+      email: payload.data.email || null,
+      accessToken: null,
+      status: "installed",
+      installedAt: syncedAt,
+      uninstalledAt: null,
+      activeAt: syncedAt,
+      deactivatedAt: null,
+      metadata: {
+        source: payload.data.source || "woocommerce_plugin_sync",
+        shop_name: payload.data.name || "",
+        currency: payload.data.currency || "",
+        synced_at: syncedAt,
+      },
+    });
+
+    return res.status(200).json({
+      ok: true,
+      platform: "woocommerce",
+      shop_identifier: payload.data.shopIdentifier,
+      sync_token: siteToken,
+    });
+  }
+);
+
+app.post(
   "/internal/tip-totals/monthly",
   express.json({ limit: "1mb" }),
   async (req, res) => {
-    if (!isValidInternalRequest(req)) {
+    const payload = parseMonthlyTipTotalPayload(req.body || {});
+    if (!payload.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: payload.error,
+      });
+    }
+
+    if (!isValidMonthlyTipTotalRequest(req, payload.data)) {
       return res.status(401).json({ ok: false, error: "Unauthorized" });
     }
 
@@ -315,14 +392,6 @@ app.post(
       return res.status(500).json({
         ok: false,
         error: "Failed to initialize database",
-      });
-    }
-
-    const payload = parseMonthlyTipTotalPayload(req.body || {});
-    if (!payload.ok) {
-      return res.status(400).json({
-        ok: false,
-        error: payload.error,
       });
     }
 
@@ -1046,11 +1115,25 @@ function isValidInternalRequest(req) {
   return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
 }
 
+function isValidMonthlyTipTotalRequest(req, payload) {
+  if (isValidInternalRequest(req)) {
+    return true;
+  }
+
+  if (payload.platform !== "woocommerce") {
+    return false;
+  }
+
+  return isValidWooCommerceSiteToken(req, payload.shopIdentifier);
+}
+
 function parseMonthlyTipTotalPayload(body) {
   const platform = parsePlatform(body.platform);
-  const shopIdentifier = String(body.shop_identifier || body.shopIdentifier || "")
-    .trim()
-    .toLowerCase();
+  const rawShopIdentifier = body.shop_identifier || body.shopIdentifier || "";
+  const shopIdentifier =
+    platform === "woocommerce"
+      ? normalizeWooCommerceShopIdentifier(rawShopIdentifier)
+      : String(rawShopIdentifier).trim().toLowerCase();
   const monthStart = normalizeMonthStart(body.month_start || body.monthStart);
   const currency = String(body.currency || "")
     .trim()
@@ -1081,6 +1164,56 @@ function parseMonthlyTipTotalPayload(body) {
       monthStart,
       currency,
       tipAmount,
+    },
+  };
+}
+
+function parseWooCommerceInstallationSyncPayload(body) {
+  const rawShopIdentifier =
+    body.shop_identifier ||
+    body.shopIdentifier ||
+    body.shop_domain ||
+    body.shopDomain ||
+    body.site_url ||
+    body.siteUrl ||
+    body.store_url ||
+    body.storeUrl ||
+    "";
+  const shopIdentifier = normalizeWooCommerceShopIdentifier(rawShopIdentifier);
+  const shopDomain = normalizeOptionalWooCommerceShopDomain(
+    body.shop_domain || body.shopDomain || body.site_url || body.siteUrl || ""
+  );
+  const email = String(body.email || "").trim();
+  const name = String(body.name || body.shop_name || body.shopName || "").trim();
+  const currency = String(body.currency || "")
+    .trim()
+    .toUpperCase();
+  const source = String(body.source || "").trim();
+
+  if (!shopIdentifier) {
+    return {
+      ok: false,
+      error: "shop_identifier must be a valid WooCommerce site hostname or URL",
+    };
+  }
+  if (body.shop_domain || body.shopDomain || body.site_url || body.siteUrl) {
+    if (!shopDomain) {
+      return { ok: false, error: "shop_domain must be a valid URL or hostname" };
+    }
+  }
+  if (currency && !/^[A-Z]{3}$/.test(currency)) {
+    return { ok: false, error: "currency must be a 3-letter ISO code" };
+  }
+
+  return {
+    ok: true,
+    data: {
+      shopIdentifier,
+      shopDomain,
+      email,
+      name,
+      currency,
+      source,
     },
   };
 }
@@ -1125,6 +1258,99 @@ function parseShopifyInstallationSyncPayload(body) {
       source,
     },
   };
+}
+
+function normalizeWooCommerceShopIdentifier(value) {
+  const rawValue = String(value || "").trim().toLowerCase();
+  if (!rawValue) return "";
+
+  const urlValue = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawValue)
+    ? rawValue
+    : `https://${rawValue}`;
+
+  try {
+    const url = new URL(urlValue);
+    const hostname = url.hostname.replace(/\.$/, "").toLowerCase();
+    if (!isValidWooCommerceHostname(hostname)) return "";
+    return hostname;
+  } catch {
+    return "";
+  }
+}
+
+function normalizeOptionalWooCommerceShopDomain(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return "";
+
+  const normalizedIdentifier = normalizeWooCommerceShopIdentifier(rawValue);
+  if (!normalizedIdentifier) return "";
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rawValue)) {
+    try {
+      const url = new URL(rawValue);
+      url.hash = "";
+      url.search = "";
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return "";
+    }
+  }
+
+  return normalizedIdentifier;
+}
+
+function isValidWooCommerceHostname(hostname) {
+  return (
+    /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(hostname) &&
+    hostname.includes(".") &&
+    !hostname.includes("..")
+  );
+}
+
+function createWooCommerceSiteToken(shopIdentifier) {
+  const secret = getWooCommerceSyncTokenSecret();
+  if (!secret) {
+    throw new Error("Missing WOOCOMMERCE_SYNC_TOKEN_SECRET");
+  }
+
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`woocommerce:${shopIdentifier}`)
+    .digest("hex");
+}
+
+function isValidWooCommerceSiteToken(req, shopIdentifier) {
+  let expectedToken;
+  try {
+    expectedToken = createWooCommerceSiteToken(shopIdentifier);
+  } catch {
+    return false;
+  }
+
+  const receivedToken = String(
+    req.get("x-snaptip-site-token") ||
+      req.get("x-snaptip-woocommerce-token") ||
+      req.get("authorization") ||
+      ""
+  )
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+
+  if (!receivedToken) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expectedToken);
+  const receivedBuffer = Buffer.from(receivedToken);
+  if (expectedBuffer.length !== receivedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
+}
+
+function getWooCommerceSyncTokenSecret() {
+  return String(process.env.WOOCOMMERCE_SYNC_TOKEN_SECRET || "").trim();
 }
 
 function normalizeMonthStart(value) {

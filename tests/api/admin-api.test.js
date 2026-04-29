@@ -10,6 +10,7 @@ process.env.SHOPIFY_API_KEY = "test-client-id";
 process.env.APP_BASE_URL = "https://snaptip.tech";
 process.env.SHOPIFY_EMBEDDED_APP_URL = "https://app.snaptip.tech";
 process.env.INTERNAL_SYNC_SECRET = "internal-secret";
+process.env.WOOCOMMERCE_SYNC_TOKEN_SECRET = "woocommerce-token-secret";
 process.env.SMTP_HOST = "smtp.example.com";
 process.env.SMTP_PORT = "587";
 process.env.SMTP_USER = "smtp-user";
@@ -170,6 +171,128 @@ describe("admin-api integration", () => {
       currency: "USD",
       tipAmount: 123.45,
     });
+  });
+
+  it("accepts WooCommerce installation sync and returns a per-site token", async () => {
+    const response = await request(app)
+      .post("/internal/installations/woocommerce")
+      .send({
+        shop_identifier: "https://Store.Example.com/wp-admin",
+        shop_domain: "https://Store.Example.com",
+        email: "owner@example.com",
+        name: "Example Store",
+        currency: "usd",
+        source: "activation",
+      });
+
+    const expectedToken = crypto
+      .createHmac("sha256", process.env.WOOCOMMERCE_SYNC_TOKEN_SECRET)
+      .update("woocommerce:store.example.com")
+      .digest("hex");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      platform: "woocommerce",
+      shop_identifier: "store.example.com",
+      sync_token: expectedToken,
+    });
+    expect(mockDb.upsertInstallation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: "woocommerce",
+        shopIdentifier: "store.example.com",
+        shopDomain: "https://store.example.com",
+        email: "owner@example.com",
+        accessToken: null,
+        status: "installed",
+        metadata: expect.objectContaining({
+          source: "activation",
+          shop_name: "Example Store",
+          currency: "USD",
+        }),
+      })
+    );
+  });
+
+  it("upserts repeated WooCommerce installation syncs for the same shop", async () => {
+    await request(app).post("/internal/installations/woocommerce").send({
+      shop_identifier: "store.example.com",
+      email: "owner@example.com",
+    });
+    await request(app).post("/internal/installations/woocommerce").send({
+      shop_identifier: "https://store.example.com/settings",
+      email: "owner@example.com",
+      source: "settings_retry",
+    });
+
+    expect(mockDb.upsertInstallation).toHaveBeenCalledTimes(2);
+    expect(mockDb.upsertInstallation).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        platform: "woocommerce",
+        shopIdentifier: "store.example.com",
+      })
+    );
+    expect(mockDb.upsertInstallation).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        platform: "woocommerce",
+        shopIdentifier: "store.example.com",
+        metadata: expect.objectContaining({ source: "settings_retry" }),
+      })
+    );
+  });
+
+  it("rejects WooCommerce installation sync without a valid shop identifier", async () => {
+    const response = await request(app)
+      .post("/internal/installations/woocommerce")
+      .send({ shop_identifier: "not a hostname" });
+
+    expect(response.status).toBe(400);
+    expect(mockDb.upsertInstallation).not.toHaveBeenCalled();
+  });
+
+  it("accepts WooCommerce monthly tip totals with a per-site token", async () => {
+    const siteToken = crypto
+      .createHmac("sha256", process.env.WOOCOMMERCE_SYNC_TOKEN_SECRET)
+      .update("woocommerce:store.example.com")
+      .digest("hex");
+
+    const response = await request(app)
+      .post("/internal/tip-totals/monthly")
+      .set("x-snaptip-site-token", siteToken)
+      .send({
+        platform: "woocommerce",
+        shop_identifier: "https://store.example.com",
+        month_start: "2026-04-29",
+        currency: "usd",
+        tip_amount: 42.5,
+      });
+
+    expect(response.status).toBe(200);
+    expect(mockDb.upsertInstallationMonthlyTipTotal).toHaveBeenCalledWith({
+      platform: "woocommerce",
+      shopIdentifier: "store.example.com",
+      monthStart: "2026-04-01",
+      currency: "USD",
+      tipAmount: 42.5,
+    });
+  });
+
+  it("rejects WooCommerce monthly tip totals with an invalid per-site token", async () => {
+    const response = await request(app)
+      .post("/internal/tip-totals/monthly")
+      .set("x-snaptip-site-token", "bad-token")
+      .send({
+        platform: "woocommerce",
+        shop_identifier: "store.example.com",
+        month_start: "2026-04-01",
+        currency: "USD",
+        tip_amount: 10,
+      });
+
+    expect(response.status).toBe(401);
+    expect(mockDb.upsertInstallationMonthlyTipTotal).not.toHaveBeenCalled();
   });
 
   it("rejects internal monthly tip upserts without the shared secret", async () => {
