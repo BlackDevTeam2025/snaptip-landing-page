@@ -1248,7 +1248,18 @@ async function syncMonthlyTipsToHubSpot({ monthStart }) {
     try {
       contact = await hubspotService.upsertContact(config, summary);
       deal = await hubspotService.upsertMonthlyTipDeal(config, summary);
-      await hubspotService.associateContactToDeal(config, contact?.id, deal?.id);
+      if (contact?.id && deal?.id) {
+        try {
+          await hubspotService.associateContactToDeal(config, contact.id, deal.id);
+        } catch (associationError) {
+          console.warn("HubSpot association failed, continuing sync", {
+            monthStart: summary.monthStart,
+            platform: summary.platform,
+            shopIdentifier: summary.shopIdentifier,
+            detail: getHubSpotErrorMessage(associationError),
+          });
+        }
+      }
 
       await dbService.recordHubSpotSyncJob({
         monthStart: summary.monthStart,
@@ -1310,13 +1321,33 @@ function toHubSpotMonthlyTipSummary(row) {
     email: String(row.email || "").trim(),
     status: row.status || "installed",
     shopName: row.metadata?.shop_name || "",
+    installDate: toHubSpotDate(row.active_at || row.installed_at),
+    deactivateDate: toHubSpotDate(row.deactivated_at || row.uninstalled_at),
     monthStart:
       row.month_start instanceof Date
         ? getCurrentMonthStart(row.month_start)
         : normalizeMonthStart(row.month_start),
     currency: String(row.currency || "").trim().toUpperCase(),
     tipAmount: Number(row.tip_amount || 0),
+    monthlyTipRev: Number(row.tip_amount || 0),
+    tipAmountForSnapTip: Number(row.tip_amount || 0),
   };
+}
+
+function toHubSpotDate(value) {
+  if (!value) {
+    return undefined;
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function getHubSpotErrorMessage(error) {

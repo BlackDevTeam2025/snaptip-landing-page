@@ -482,6 +482,8 @@ async function listMonthlyTipSummaries({ monthStart, includeZero = false }) {
         i.shop_domain,
         i.email,
         i.status,
+        COALESCE(i.active_at, i.installed_at) AS active_at,
+        COALESCE(i.deactivated_at, i.uninstalled_at) AS deactivated_at,
         i.metadata,
         t.month_start,
         t.currency,

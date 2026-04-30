@@ -80,6 +80,40 @@ const CONTACT_PROPERTIES = [
     description: "Most recent monthly tip amount synced by SnapTip.",
   },
   {
+    name: "snaptip_install_date",
+    label: "SnapTip Install Date",
+    type: "date",
+    fieldType: "date",
+    groupName: "contactinformation",
+    description: "Date the shop installed or activated SnapTip.",
+  },
+  {
+    name: "snaptip_deactivate_date",
+    label: "SnapTip Deactivate Date",
+    type: "date",
+    fieldType: "date",
+    groupName: "contactinformation",
+    description: "Date the shop uninstalled or deactivated SnapTip.",
+  },
+  {
+    name: "snaptip_latest_monthly_tip_rev",
+    label: "SnapTip Latest Monthly Tip Rev",
+    type: "number",
+    fieldType: "number",
+    groupName: "contactinformation",
+    numberDisplayHint: "currency",
+    description: "Most recent monthly tip revenue synced by SnapTip.",
+  },
+  {
+    name: "snaptip_latest_tip_amount_for_snaptip",
+    label: "SnapTip Latest Tip Amount for SnapTip",
+    type: "number",
+    fieldType: "number",
+    groupName: "contactinformation",
+    numberDisplayHint: "currency",
+    description: "Most recent monthly tip amount attributed to SnapTip.",
+  },
+  {
     name: "snaptip_latest_tip_currency",
     label: "SnapTip Latest Tip Currency",
     type: "string",
@@ -149,6 +183,40 @@ const DEAL_PROPERTIES = [
     groupName: "dealinformation",
     description: "Currency code for this monthly tip summary.",
   },
+  {
+    name: "snaptip_install_date",
+    label: "SnapTip Install Date",
+    type: "date",
+    fieldType: "date",
+    groupName: "dealinformation",
+    description: "Date the shop installed or activated SnapTip.",
+  },
+  {
+    name: "snaptip_deactivate_date",
+    label: "SnapTip Deactivate Date",
+    type: "date",
+    fieldType: "date",
+    groupName: "dealinformation",
+    description: "Date the shop uninstalled or deactivated SnapTip.",
+  },
+  {
+    name: "snaptip_monthly_tip_rev",
+    label: "SnapTip Monthly Tip Rev",
+    type: "number",
+    fieldType: "number",
+    groupName: "dealinformation",
+    numberDisplayHint: "currency",
+    description: "Monthly tip revenue represented by this Deal.",
+  },
+  {
+    name: "snaptip_tip_amount_for_snaptip",
+    label: "SnapTip Tip Amount for SnapTip",
+    type: "number",
+    fieldType: "number",
+    groupName: "dealinformation",
+    numberDisplayHint: "currency",
+    description: "Monthly tip amount attributed to SnapTip for this Deal.",
+  },
 ];
 
 class HubSpotError extends Error {
@@ -213,6 +281,10 @@ async function upsertContact(config = getHubSpotRuntimeConfig(), summary) {
     snaptip_status: summary.status || "installed",
     snaptip_latest_tip_month: summary.monthStart,
     snaptip_latest_tip_amount: String(summary.tipAmount),
+    snaptip_install_date: summary.installDate,
+    snaptip_deactivate_date: summary.deactivateDate,
+    snaptip_latest_monthly_tip_rev: String(summary.monthlyTipRev),
+    snaptip_latest_tip_amount_for_snaptip: String(summary.tipAmountForSnapTip),
     snaptip_latest_tip_currency: summary.currency,
     company: summary.shopName || summary.shopDomain || summary.shopIdentifier,
     website: summary.shopDomain || summary.shopIdentifier,
@@ -266,6 +338,10 @@ async function upsertMonthlyTipDeal(config = getHubSpotRuntimeConfig(), summary)
             snaptip_shop_identifier: summary.shopIdentifier,
             snaptip_tip_month: summary.monthStart,
             snaptip_tip_currency: summary.currency,
+            snaptip_install_date: summary.installDate,
+            snaptip_deactivate_date: summary.deactivateDate,
+            snaptip_monthly_tip_rev: String(summary.monthlyTipRev),
+            snaptip_tip_amount_for_snaptip: String(summary.tipAmountForSnapTip),
           },
         },
       ],
@@ -287,9 +363,9 @@ async function associateContactToDeal(
 
   return hubSpotRequest(
     config,
-    `/crm/v4/objects/contact/${encodeURIComponent(
+    `/crm/v4/objects/contacts/${encodeURIComponent(
       contactId
-    )}/associations/default/deal/${encodeURIComponent(dealId)}`,
+    )}/associations/default/deals/${encodeURIComponent(dealId)}`,
     { method: "PUT" }
   );
 }
