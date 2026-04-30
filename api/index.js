@@ -7,10 +7,12 @@ const express = require("express");
 const authHelpers = require("./admin-auth");
 const db = require("./db");
 const email = require("./email");
+const hubspot = require("./hubspot");
 
 const app = express();
 let dbService = db;
 let emailService = email;
+let hubspotService = hubspot;
 
 const LOG_DIR = "/tmp/webhooks";
 const MAX_BODY_SIZE = "2mb";
@@ -399,6 +401,75 @@ app.post(
     return res.status(200).json({ ok: true, data: row });
   }
 );
+
+app.post(
+  "/internal/hubspot/setup",
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
+    if (!isValidInternalRequest(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    try {
+      const config = hubspotService.getHubSpotRuntimeConfig(process.env);
+      const results = await hubspotService.ensureHubSpotSchema(config);
+      return res.status(200).json({ ok: true, data: results });
+    } catch (error) {
+      console.error("HubSpot setup failed:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "HubSpot setup failed",
+        detail: getHubSpotErrorMessage(error),
+      });
+    }
+  }
+);
+
+app.post(
+  "/internal/hubspot/sync-monthly-tips",
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
+    if (!isValidInternalRequest(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const monthStart =
+      normalizeMonthStart(req.body?.month_start || req.body?.monthStart) ||
+      getPreviousMonthStart();
+
+    try {
+      const result = await syncMonthlyTipsToHubSpot({ monthStart });
+      return res.status(200).json({ ok: true, data: result });
+    } catch (error) {
+      console.error("HubSpot monthly tip sync failed:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "HubSpot monthly tip sync failed",
+        detail: getHubSpotErrorMessage(error),
+      });
+    }
+  }
+);
+
+app.get("/internal/cron/hubspot/monthly-tips", async (req, res) => {
+  if (!isValidCronRequest(req)) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  const monthStart = normalizeMonthStart(req.query.month_start) || getPreviousMonthStart();
+
+  try {
+    const result = await syncMonthlyTipsToHubSpot({ monthStart });
+    return res.status(200).json({ ok: true, data: result });
+  } catch (error) {
+    console.error("HubSpot cron monthly tip sync failed:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "HubSpot cron monthly tip sync failed",
+      detail: getHubSpotErrorMessage(error),
+    });
+  }
+});
 
 const adminRouter = express.Router();
 adminRouter.use(express.json({ limit: "1mb" }));
@@ -1115,6 +1186,154 @@ function isValidInternalRequest(req) {
   return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
 }
 
+function isValidCronRequest(req) {
+  const expectedToken = String(process.env.CRON_SECRET || "").trim();
+  if (!expectedToken) {
+    return false;
+  }
+
+  const receivedToken = String(req.get("authorization") || "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+  if (!receivedToken) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expectedToken);
+  const receivedBuffer = Buffer.from(receivedToken);
+  if (expectedBuffer.length !== receivedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
+}
+
+async function syncMonthlyTipsToHubSpot({ monthStart }) {
+  if (!dbService.isDbConfigured()) {
+    throw new Error("Database is not configured");
+  }
+
+  await dbService.ensureSchema();
+
+  const config = hubspotService.getHubSpotRuntimeConfig(process.env);
+  const supportedCurrencies = await hubspotService.getSupportedDealCurrencies(config);
+  const summaries = await dbService.listMonthlyTipSummaries({ monthStart });
+  const currencySet = new Set(supportedCurrencies);
+  const results = [];
+
+  for (const row of summaries) {
+    const summary = toHubSpotMonthlyTipSummary(row);
+    if (currencySet.size > 0 && !currencySet.has(summary.currency)) {
+      const error = `Unsupported HubSpot deal currency: ${summary.currency}`;
+      await dbService.recordHubSpotSyncJob({
+        monthStart: summary.monthStart,
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "skipped",
+        error,
+      });
+      results.push({
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "skipped",
+        error,
+      });
+      continue;
+    }
+
+    let contact = null;
+    let deal = null;
+    try {
+      contact = await hubspotService.upsertContact(config, summary);
+      deal = await hubspotService.upsertMonthlyTipDeal(config, summary);
+      await hubspotService.associateContactToDeal(config, contact?.id, deal?.id);
+
+      await dbService.recordHubSpotSyncJob({
+        monthStart: summary.monthStart,
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "succeeded",
+        hubspotContactId: contact?.id || "",
+        hubspotDealId: deal?.id || "",
+      });
+
+      results.push({
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "succeeded",
+        hubspotContactId: contact?.id || null,
+        hubspotDealId: deal?.id || null,
+      });
+    } catch (error) {
+      const message = getHubSpotErrorMessage(error);
+      await dbService.recordHubSpotSyncJob({
+        monthStart: summary.monthStart,
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "failed",
+        hubspotContactId: contact?.id || "",
+        hubspotDealId: deal?.id || "",
+        error: message,
+      });
+
+      results.push({
+        platform: summary.platform,
+        shopIdentifier: summary.shopIdentifier,
+        currency: summary.currency,
+        status: "failed",
+        retryable: Boolean(error?.retryable),
+        error: message,
+      });
+    }
+  }
+
+  return {
+    monthStart,
+    total: results.length,
+    succeeded: results.filter((row) => row.status === "succeeded").length,
+    failed: results.filter((row) => row.status === "failed").length,
+    skipped: results.filter((row) => row.status === "skipped").length,
+    results,
+  };
+}
+
+function toHubSpotMonthlyTipSummary(row) {
+  return {
+    platform: row.platform,
+    shopIdentifier: row.shop_identifier,
+    shopDomain: row.shop_domain || row.shop_identifier,
+    email: String(row.email || "").trim(),
+    status: row.status || "installed",
+    shopName: row.metadata?.shop_name || "",
+    monthStart:
+      row.month_start instanceof Date
+        ? getCurrentMonthStart(row.month_start)
+        : normalizeMonthStart(row.month_start),
+    currency: String(row.currency || "").trim().toUpperCase(),
+    tipAmount: Number(row.tip_amount || 0),
+  };
+}
+
+function getHubSpotErrorMessage(error) {
+  const message = error?.message || "Unknown HubSpot error";
+  if (!error?.body) {
+    return message;
+  }
+
+  const detail =
+    error.body.message ||
+    error.body.error ||
+    error.body.category ||
+    error.body.raw ||
+    "";
+  return detail ? `${message}: ${detail}` : message;
+}
+
 function isValidMonthlyTipTotalRequest(req, payload) {
   if (isValidInternalRequest(req)) {
     return true;
@@ -1366,6 +1585,12 @@ function getCurrentMonthStart(date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   return `${year}-${month}-01`;
+}
+
+function getPreviousMonthStart(date = new Date()) {
+  return getCurrentMonthStart(
+    new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1))
+  );
 }
 
 function formatMonthLabel(monthStart) {
@@ -1742,6 +1967,14 @@ app.setEmailServiceForTests = (nextEmailService) => {
 
 app.resetEmailServiceForTests = () => {
   emailService = email;
+};
+
+app.setHubSpotServiceForTests = (nextHubSpotService) => {
+  hubspotService = nextHubSpotService;
+};
+
+app.resetHubSpotServiceForTests = () => {
+  hubspotService = hubspot;
 };
 
 module.exports = app;

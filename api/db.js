@@ -468,6 +468,114 @@ async function upsertInstallationMonthlyTipTotal({
   return result.rows[0] || null;
 }
 
+async function listMonthlyTipSummaries({ monthStart, includeZero = false }) {
+  await ensureSchema();
+
+  const values = [monthStart];
+  const amountFilter = includeZero ? "" : "AND t.tip_amount > 0";
+  const result = await sql.query(
+    `
+      SELECT
+        i.id AS installation_id,
+        i.platform,
+        i.shop_identifier,
+        i.shop_domain,
+        i.email,
+        i.status,
+        i.metadata,
+        t.month_start,
+        t.currency,
+        t.tip_amount,
+        i.hubspot_contact_id
+      FROM installation_monthly_tip_totals t
+      INNER JOIN app_installations i
+        ON i.platform = t.platform
+       AND i.shop_identifier = t.shop_identifier
+      WHERE t.month_start = $1::date
+        AND i.status = 'installed'
+        ${amountFilter}
+      ORDER BY t.tip_amount DESC, i.platform ASC, i.shop_identifier ASC, t.currency ASC
+    `,
+    values
+  );
+
+  return result.rows;
+}
+
+async function recordHubSpotSyncJob({
+  monthStart,
+  platform,
+  shopIdentifier,
+  currency,
+  status,
+  hubspotContactId,
+  hubspotDealId,
+  error,
+}) {
+  await ensureSchema();
+
+  const result = await sql.query(
+    `
+      INSERT INTO hubspot_sync_jobs (
+        month_start,
+        platform,
+        shop_identifier,
+        currency,
+        status,
+        attempts,
+        hubspot_contact_id,
+        hubspot_deal_id,
+        last_error,
+        synced_at
+      ) VALUES ($1::date, $2, $3, $4, $5, 1, $6, $7, $8, CASE WHEN $5 = 'succeeded' THEN NOW() ELSE NULL END)
+      ON CONFLICT (sync_type, month_start, platform, shop_identifier, currency)
+      DO UPDATE SET
+        status = EXCLUDED.status,
+        attempts = hubspot_sync_jobs.attempts + 1,
+        hubspot_contact_id = COALESCE(EXCLUDED.hubspot_contact_id, hubspot_sync_jobs.hubspot_contact_id),
+        hubspot_deal_id = COALESCE(EXCLUDED.hubspot_deal_id, hubspot_sync_jobs.hubspot_deal_id),
+        last_error = EXCLUDED.last_error,
+        synced_at = CASE WHEN EXCLUDED.status = 'succeeded' THEN NOW() ELSE hubspot_sync_jobs.synced_at END,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      monthStart,
+      platform,
+      shopIdentifier,
+      currency,
+      status,
+      hubspotContactId || null,
+      hubspotDealId || null,
+      error || null,
+    ]
+  );
+
+  if (hubspotContactId || error !== undefined) {
+    await sql.query(
+      `
+        UPDATE app_installations
+        SET
+          hubspot_contact_id = COALESCE($3, hubspot_contact_id),
+          last_hubspot_sync_at = CASE WHEN $4 = 'succeeded' THEN NOW() ELSE last_hubspot_sync_at END,
+          hubspot_sync_error = $5,
+          updated_at = NOW()
+        WHERE platform = $1
+          AND shop_identifier = $2
+      `,
+      [
+        platform,
+        shopIdentifier,
+        hubspotContactId || null,
+        status,
+        error || null,
+      ]
+    );
+  }
+
+  return result.rows[0] || null;
+}
+
 async function getBulkEmailInstallations({ installationIds, monthStart }) {
   await ensureSchema();
 
@@ -755,6 +863,8 @@ module.exports = {
   listInstallations,
   getInstallationById,
   upsertInstallationMonthlyTipTotal,
+  listMonthlyTipSummaries,
+  recordHubSpotSyncJob,
   getBulkEmailInstallations,
   createEmailCampaign,
   updateEmailCampaignStatus,

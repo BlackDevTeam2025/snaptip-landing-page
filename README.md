@@ -38,6 +38,9 @@ Copy `.env.example` and configure:
   - `SMTP_FROM_EMAIL`
   - `SMTP_FROM_NAME`
   - `SNAPTIP_EMAIL_CTA_URL`
+- HubSpot sync envs if you want monthly tip summaries in HubSpot:
+  - `HUBSPOT_ACCESS_TOKEN`
+  - `CRON_SECRET`
 
 ### Gmail SMTP example
 For a Gmail mailbox using an App Password:
@@ -79,6 +82,17 @@ Notes:
 - The install response returns a per-site `sync_token` derived server-side from `WOOCOMMERCE_SYNC_TOKEN_SECRET`. The public plugin should store that token and send it as `x-snaptip-site-token`; do not hardcode `INTERNAL_SYNC_SECRET` in the plugin.
 - `POST /internal/tip-totals/monthly` accepts WooCommerce monthly tip totals with the per-site token. Payloads send an absolute monthly total, not a delta: `platform=woocommerce`, `shop_identifier`, `month_start`, `currency`, and `tip_amount`.
 - The WooCommerce v0.2.0 sync only sends store metadata and monthly tip totals to `snaptip.tech`. It does not send customer names, customer emails, order line items, or per-order audit data.
+
+## HubSpot monthly tip sync
+- SnapTip stores monthly tip totals in Postgres as the source of truth.
+- `POST /internal/hubspot/setup` creates the required HubSpot Contact and Deal custom properties. Call it with `x-snaptip-internal-token`.
+- `POST /internal/hubspot/sync-monthly-tips` syncs one month. Payload: `{ "month_start": "2026-04-01" }`.
+- Vercel Cron calls `GET /internal/cron/hubspot/monthly-tips` on the first day of each month to sync the previous month.
+- HubSpot mapping:
+  - Contact = one shop identity, upserted by `snaptip_installation_key`.
+  - Deal = one monthly tip summary, upserted by `snaptip_monthly_tip_key`.
+  - Deal amount is the monthly tip total and the Deal is associated to the Contact.
+- Set `CRON_SECRET` in Vercel so cron requests include the `Authorization: Bearer ...` header.
 
 ## Two-lane test flow
 Use two separate lanes instead of trying to force local dev and production install tracking through the same URL.

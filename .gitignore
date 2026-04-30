@@ -9,3 +9,4 @@ coverage/
 # This repo needs build/utility scripts in Vercel.
 !/scripts/
 !/scripts/*.js
+.gitnexus

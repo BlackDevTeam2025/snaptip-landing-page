@@ -17,6 +17,8 @@ process.env.SMTP_USER = "smtp-user";
 process.env.SMTP_PASS = "smtp-pass";
 process.env.SMTP_FROM_EMAIL = "hello@snaptip.tech";
 process.env.SNAPTIP_EMAIL_CTA_URL = "https://snaptip.tech/tip";
+process.env.HUBSPOT_ACCESS_TOKEN = "hubspot-token";
+process.env.CRON_SECRET = "cron-secret";
 
 const { default: adminAuth } = await import("../../api/admin-auth");
 const { default: app } = await import("../../api/index");
@@ -68,6 +70,8 @@ describe("admin-api integration", () => {
       insertWebhookEvent: vi.fn(async () => {}),
       markShopUninstalled: vi.fn(async () => {}),
       upsertInstallation: vi.fn(async () => {}),
+      listMonthlyTipSummaries: vi.fn(async () => []),
+      recordHubSpotSyncJob: vi.fn(async (payload) => ({ id: 1, ...payload })),
     };
 
     app.setDbServiceForTests(mockDb);
@@ -86,6 +90,24 @@ describe("admin-api integration", () => {
       })),
       createEmailTransport: vi.fn(() => ({ sendMail: vi.fn() })),
       sendMonthlyTipEmail: vi.fn(async () => ({ messageId: "msg_123" })),
+    });
+    app.setHubSpotServiceForTests({
+      getHubSpotRuntimeConfig: vi.fn(() => ({
+        ok: true,
+        accessToken: "hubspot-token",
+        baseUrl: "https://api.hubapi.com",
+      })),
+      ensureHubSpotSchema: vi.fn(async () => [
+        {
+          objectType: "contacts",
+          property: "snaptip_installation_key",
+          status: "exists",
+        },
+      ]),
+      getSupportedDealCurrencies: vi.fn(async () => ["USD"]),
+      upsertContact: vi.fn(async () => ({ id: "contact-1" })),
+      upsertMonthlyTipDeal: vi.fn(async () => ({ id: "deal-1" })),
+      associateContactToDeal: vi.fn(async () => ({})),
     });
   });
 
@@ -308,6 +330,116 @@ describe("admin-api integration", () => {
 
     expect(response.status).toBe(401);
     expect(mockDb.upsertInstallationMonthlyTipTotal).not.toHaveBeenCalled();
+  });
+
+  it("sets up HubSpot custom properties through the internal endpoint", async () => {
+    const response = await request(app)
+      .post("/internal/hubspot/setup")
+      .set("x-snaptip-internal-token", "internal-secret")
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+    expect(response.body.data[0]).toMatchObject({
+      objectType: "contacts",
+      property: "snaptip_installation_key",
+    });
+  });
+
+  it("syncs monthly tip totals to HubSpot contact and deal records", async () => {
+    mockDb.listMonthlyTipSummaries = vi.fn(async () => [
+      {
+        installation_id: 10,
+        platform: "shopify",
+        shop_identifier: "demo.myshopify.com",
+        shop_domain: "demo.myshopify.com",
+        email: "merchant@example.com",
+        status: "installed",
+        metadata: { shop_name: "Demo Shop" },
+        month_start: "2026-04-01",
+        currency: "USD",
+        tip_amount: "123.45",
+      },
+    ]);
+
+    const response = await request(app)
+      .post("/internal/hubspot/sync-monthly-tips")
+      .set("x-snaptip-internal-token", "internal-secret")
+      .send({ month_start: "2026-04-29" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      monthStart: "2026-04-01",
+      total: 1,
+      succeeded: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect(mockDb.listMonthlyTipSummaries).toHaveBeenCalledWith({
+      monthStart: "2026-04-01",
+    });
+    expect(mockDb.recordHubSpotSyncJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        monthStart: "2026-04-01",
+        platform: "shopify",
+        shopIdentifier: "demo.myshopify.com",
+        currency: "USD",
+        status: "succeeded",
+        hubspotContactId: "contact-1",
+        hubspotDealId: "deal-1",
+      })
+    );
+  });
+
+  it("skips HubSpot monthly tip sync for unsupported deal currencies", async () => {
+    mockDb.listMonthlyTipSummaries = vi.fn(async () => [
+      {
+        platform: "woocommerce",
+        shop_identifier: "store.example.com",
+        shop_domain: "https://store.example.com",
+        email: "owner@example.com",
+        status: "installed",
+        metadata: { shop_name: "Store" },
+        month_start: "2026-04-01",
+        currency: "EUR",
+        tip_amount: "42.50",
+      },
+    ]);
+
+    const response = await request(app)
+      .post("/internal/hubspot/sync-monthly-tips")
+      .set("x-snaptip-internal-token", "internal-secret")
+      .send({ month_start: "2026-04-01" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      total: 1,
+      succeeded: 0,
+      skipped: 1,
+    });
+    expect(mockDb.recordHubSpotSyncJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "skipped",
+        currency: "EUR",
+      })
+    );
+  });
+
+  it("runs the HubSpot monthly tip cron with CRON_SECRET auth", async () => {
+    const response = await request(app)
+      .get("/internal/cron/hubspot/monthly-tips?month_start=2026-04-01")
+      .set("authorization", "Bearer cron-secret");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.monthStart).toBe("2026-04-01");
+  });
+
+  it("rejects the HubSpot monthly tip cron without CRON_SECRET auth", async () => {
+    const response = await request(app).get(
+      "/internal/cron/hubspot/monthly-tips?month_start=2026-04-01"
+    );
+
+    expect(response.status).toBe(401);
   });
 
   it("sends bulk installation emails and logs recipients", async () => {
