@@ -35,6 +35,8 @@ describe("admin-api integration", () => {
 
   /** @type {any} */
   let mockDb;
+  /** @type {any} */
+  let mockHubSpot;
 
   beforeEach(() => {
     mockDb = {
@@ -91,7 +93,7 @@ describe("admin-api integration", () => {
       createEmailTransport: vi.fn(() => ({ sendMail: vi.fn() })),
       sendMonthlyTipEmail: vi.fn(async () => ({ messageId: "msg_123" })),
     });
-    app.setHubSpotServiceForTests({
+    mockHubSpot = {
       getHubSpotRuntimeConfig: vi.fn(() => ({
         ok: true,
         accessToken: "hubspot-token",
@@ -108,7 +110,8 @@ describe("admin-api integration", () => {
       upsertContact: vi.fn(async () => ({ id: "contact-1" })),
       upsertMonthlyTipDeal: vi.fn(async () => ({ id: "deal-1" })),
       associateContactToDeal: vi.fn(async () => ({})),
-    });
+    };
+    app.setHubSpotServiceForTests(mockHubSpot);
   });
 
   it("returns 401 for /auth/me without login", async () => {
@@ -377,6 +380,7 @@ describe("admin-api integration", () => {
     });
     expect(mockDb.listMonthlyTipSummaries).toHaveBeenCalledWith({
       monthStart: "2026-04-01",
+      includeZero: true,
     });
     expect(mockDb.recordHubSpotSyncJob).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -387,6 +391,60 @@ describe("admin-api integration", () => {
         status: "succeeded",
         hubspotContactId: "contact-1",
         hubspotDealId: "deal-1",
+      })
+    );
+  });
+
+  it("syncs installed shops with zero monthly tips to HubSpot", async () => {
+    mockDb.listMonthlyTipSummaries = vi.fn(async () => [
+      {
+        installation_id: 11,
+        platform: "woocommerce",
+        shop_identifier: "store.example.com",
+        shop_domain: "https://store.example.com",
+        email: "owner@example.com",
+        status: "installed",
+        active_at: "2026-04-05T00:00:00.000Z",
+        deactivated_at: null,
+        metadata: { shop_name: "Store" },
+        month_start: "2026-04-01",
+        currency: "USD",
+        tip_amount: "0.00",
+      },
+    ]);
+
+    const response = await request(app)
+      .post("/internal/hubspot/sync-monthly-tips")
+      .set("x-snaptip-internal-token", "internal-secret")
+      .send({ month_start: "2026-04-01" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      total: 1,
+      succeeded: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect(mockDb.listMonthlyTipSummaries).toHaveBeenCalledWith({
+      monthStart: "2026-04-01",
+      includeZero: true,
+    });
+    expect(mockHubSpot.upsertContact).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        platform: "woocommerce",
+        shopIdentifier: "store.example.com",
+        monthlyTipRev: 0,
+        tipAmountForSnapTip: 0,
+      })
+    );
+    expect(mockHubSpot.upsertMonthlyTipDeal).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        platform: "woocommerce",
+        shopIdentifier: "store.example.com",
+        monthlyTipRev: 0,
+        tipAmountForSnapTip: 0,
       })
     );
   });

@@ -1217,7 +1217,10 @@ async function syncMonthlyTipsToHubSpot({ monthStart }) {
 
   const config = hubspotService.getHubSpotRuntimeConfig(process.env);
   const supportedCurrencies = await hubspotService.getSupportedDealCurrencies(config);
-  const summaries = await dbService.listMonthlyTipSummaries({ monthStart });
+  const summaries = await dbService.listMonthlyTipSummaries({
+    monthStart,
+    includeZero: true,
+  });
   const currencySet = new Set(supportedCurrencies);
   const results = [];
 

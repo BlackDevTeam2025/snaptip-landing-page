@@ -472,7 +472,7 @@ async function listMonthlyTipSummaries({ monthStart, includeZero = false }) {
   await ensureSchema();
 
   const values = [monthStart];
-  const amountFilter = includeZero ? "" : "AND t.tip_amount > 0";
+  const amountFilter = includeZero ? "" : "AND COALESCE(t.tip_amount, 0) > 0";
   const result = await sql.query(
     `
       SELECT
@@ -485,18 +485,22 @@ async function listMonthlyTipSummaries({ monthStart, includeZero = false }) {
         COALESCE(i.active_at, i.installed_at) AS active_at,
         COALESCE(i.deactivated_at, i.uninstalled_at) AS deactivated_at,
         i.metadata,
-        t.month_start,
-        t.currency,
-        t.tip_amount,
+        COALESCE(t.month_start, $1::date) AS month_start,
+        COALESCE(t.currency, NULLIF(UPPER(i.metadata->>'currency'), ''), 'USD') AS currency,
+        COALESCE(t.tip_amount, 0) AS tip_amount,
         i.hubspot_contact_id
-      FROM installation_monthly_tip_totals t
-      INNER JOIN app_installations i
+      FROM app_installations i
+      LEFT JOIN installation_monthly_tip_totals t
         ON i.platform = t.platform
        AND i.shop_identifier = t.shop_identifier
-      WHERE t.month_start = $1::date
-        AND i.status = 'installed'
+       AND t.month_start = $1::date
+      WHERE COALESCE(i.active_at, i.installed_at, i.created_at) < ($1::date + INTERVAL '1 month')
+        AND (
+          COALESCE(i.deactivated_at, i.uninstalled_at) IS NULL
+          OR COALESCE(i.deactivated_at, i.uninstalled_at) >= $1::date
+        )
         ${amountFilter}
-      ORDER BY t.tip_amount DESC, i.platform ASC, i.shop_identifier ASC, t.currency ASC
+      ORDER BY COALESCE(t.tip_amount, 0) DESC, i.platform ASC, i.shop_identifier ASC, currency ASC
     `,
     values
   );
